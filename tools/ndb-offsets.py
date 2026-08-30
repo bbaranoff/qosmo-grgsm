@@ -24,8 +24,15 @@ import re, subprocess, sys, os
 TYPEDEF = os.environ.get("CALYPSO_NDB_TYPEDEF", "T_NDB_MCU_DSP")
 # Champs qui interessent le shunt. On sort tout ce qu'on trouve parmi ceux-la ;
 # un champ absent est signale par l'appelant, pas invente ici.
+# [2026-08-30] d_a5mode et a_kc AJOUTES. Ce sont les deux champs par lesquels le
+# firmware declare l'etat de chiffrement REEL de la couche 1
+# (calypso/dsp.c:dsp_load_ciph_param) : le shunt les publie dans
+# /dev/shm/calypso_kc, seule source fiable du Kc pour le pont. Les deviner par
+# #define serait ici encore plus dangereux qu'ailleurs : un offset faux ne donne
+# pas une erreur, il donne une CLE FAUSSE, donc du trafic qui se decode en
+# bruit — exactement le symptome qu'on cherche a supprimer.
 WANTED = ["a_cd", "a_fd", "a_dd_0", "a_dd_1", "a_cu", "a_fu", "a_du_0", "a_du_1",
-          "d_fb_det", "a_sync_demod", "d_tch_mode"]
+          "d_fb_det", "a_sync_demod", "d_tch_mode", "d_a5mode", "a_kc"]
 
 # ' <1><dcc8>: Abbrev Number: 22 (DW_TAG_typedef)'
 RE_DIE = re.compile(r"^\s*<(\d+)><([0-9a-f]+)>:\s+Abbrev Number:\s+\d+\s+\(([A-Za-z_]+)\)")

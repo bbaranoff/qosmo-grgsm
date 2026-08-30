@@ -356,7 +356,10 @@ fi
 
 if [ "$ACTION" = checkpaths ]; then
     rc=0
-    for v in QEMU_BIN FIRMWARE_ELF DSP_PROM0 OSMOCON OSMOCOM_CFG; do
+    # [2026-08-30] DSP_PROM0 retiré ici aussi : --check-paths échouait sur toute
+    # installation à jour (ROM plus générée depuis le merge `sans-dsp`), y
+    # compris pour les profils qui n'ouvrent jamais une ROM DSP.
+    for v in QEMU_BIN FIRMWARE_ELF OSMOCON OSMOCOM_CFG; do
         p="${!v:-}"
         if [ -z "$p" ];      then say_end "$(t fail)" "$C_KO" "$v" "non défini"; rc=1
         elif [ -e "$p" ];    then say_end " $(t ok) " "$C_OK" "$v" "$p"

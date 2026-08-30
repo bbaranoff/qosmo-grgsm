@@ -95,6 +95,18 @@
 #define NDB_A_FU            0x282  /* FACCH UL  [15] : ASSIGNMENT COMPLETE part par la */
 #define NDB_A_DU_0          0x2A0  /* UL traffic FR sub1 (cf PIEGE #1 : sub0 = a_du_1) */
 #define NDB_A_DD_1          0x108  /* DL traffic FR sub1 */
+/* ── CHIFFREMENT : l'etat REEL de la couche 1 ────────────────────────────────
+ * Ecrits par le firmware dans calypso/dsp.c:dsp_load_ciph_param() :
+ *     dsp_api.ndb->d_a5mode = mode;          0 = clair, 1..2 sur Calypso
+ *     dsp_api.ndb->a_kc[0..3]                la cle, en mots 16 bits
+ * a_kc est range A L'ENVERS de l'ordre RSL, et par mots : le firmware pose
+ * a_kc[0] = key[7] | key[6]<<8 ... a_kc[3] = key[1] | key[0]<<8. Toute lecture
+ * doit donc defaire les DEUX inversions (mot et octet), sous peine de produire
+ * une cle plausible et fausse — qui ne leve aucune erreur, elle decode en bruit.
+ * Valeurs DWARF de layer1.highram.elf au 2026-08-30 ; le resolveur les remplace
+ * au demarrage (shunt_ndb_resolve_offsets), ces #define ne sont qu'un repli. */
+#define NDB_D_A5MODE        0x1CE
+#define NDB_A_KC            0x2CE  /* a_kc[4] words */
 #define NDB_A_DU_1          0x134  /* PIEGE #1 : UL sub0 = a_du_1 (PAS a_du_0=0x2A0) cf prim_tch.c:485. JALON 3. */
 #define NDB_D_TCH_MODE      0x006
 

@@ -26,6 +26,7 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "hw/arm/calypso/calypso_uart.h"
+#include "hw/arm/calypso/calypso_kc.h"   /* format + ecrivain unique de /dev/shm/calypso_kc */
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -534,19 +535,13 @@ static void l1ctl_client_readable(void *opaque)
              * verrait un Kc « present » et chiffrerait avec une cle nulle. Fusil
              * charge pose sur la table — on met la securite. */
             if (algo >= 1 && algo <= 3 && 10 + (int)klen <= msglen) {
-                static uint32_t kc_seq = 0;
-                uint8_t kbuf[32];
-                memset(kbuf, 0, sizeof(kbuf));
-                kc_seq++;
-                memcpy(kbuf, &kc_seq, 4);              /* [0..3] seq (LE) */
-                kbuf[4] = algo; kbuf[5] = klen;        /* [4]algo [5]key_len */
-                memcpy(kbuf + 6, &payload[10], klen);  /* [6..] Kc */
-                int kfd = open("/dev/shm/calypso_kc",
-                               O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                if (kfd >= 0) {
-                    if (write(kfd, kbuf, sizeof(kbuf)) < 0) { /* ignore */ }
-                    close(kfd);
-                }
+                /* [2026-08-30] NORMALISE : un seul format, un seul ecrivain
+                 * (calypso_kc.h). L'ancien code ouvrait en O_TRUNC puis
+                 * ecrivait : entre les deux le fichier fait ZERO octet, et un
+                 * lecteur qui tombe dans cette fenetre conclut « pas de cle »,
+                 * donc « en clair ». calypso_kc_publish() garde un fd et repose
+                 * les 32 octets d'un seul pwrite — la taille ne varie jamais. */
+                uint32_t kc_seq = calypso_kc_publish(algo, &payload[10], klen, 0xFF);
                 L1CTL_LOG("CRYPTO_REQ: algo=%u klen=%u "
                           "Kc=%02x%02x%02x%02x%02x%02x%02x%02x -> "
                           "/dev/shm/calypso_kc#%u", algo, klen,
@@ -564,14 +559,10 @@ static void l1ctl_client_readable(void *opaque)
              * mobile parle a osmocon). La remise a zero du Kc ci-dessous ne
              * s'execute donc JAMAIS — a verifier avant d'activer l'A5/1. La garde
              * SI du dedie est branchee plus haut, sur DATA_CONF/DATA_IND. */
-            int kfd = open("/dev/shm/calypso_kc",
-                           O_WRONLY | O_CREAT | O_TRUNC, 0666);
-            if (kfd >= 0) {
-                uint8_t z[32]; memset(z, 0, sizeof(z));
-                if (write(kfd, z, sizeof(z)) < 0) { /* ignore */ }
-                close(kfd);
-            }
-
+            /* « en clair » passe par le meme ecrivain : algo=0 pose un
+             * enregistrement COMPLET qui DIT le clair, au lieu d'un fichier
+             * vide qu'il faut interpreter. */
+            calypso_kc_publish(0, NULL, 0, 0xFF);
         }
 
         /* Wrap in sercomm and inject into UART RX */

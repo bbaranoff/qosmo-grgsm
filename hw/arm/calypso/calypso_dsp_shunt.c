@@ -52,6 +52,7 @@
 #include "calypso_c54x.h"   /* C54xState + c54x_bsp_load/run/interrupt_ex/wake (CALYPSO_DSP=c54x route) */
 #include "calypso_layer1.h" /* calypso_l1_c_active() : ungate SB/SI (+FB) sous CALYPSO_L1=c */
 #include "hw/arm/calypso/calypso_dsp_internal.h" /* shared state + NDB-write primitives (split) */
+#include "hw/arm/calypso/calypso_kc.h"          /* format + ecrivain unique de /dev/shm/calypso_kc */
 extern int g_c54x_int3_src;  /* diag source INT3 (RO) */
 #include <stdbool.h>
 #include <stdint.h>
@@ -289,11 +290,13 @@ QEMU_BUILD_BUG_ON(!(NDB_W_CHECK));
  * ═══════════════════════════════════════════════════════════════════════════ */
 struct ndb_offsets {
     uint32_t a_cd, a_fd, a_dd_0, a_cu, a_fu, a_du_1;
+    uint32_t d_a5mode, a_kc;
     bool     resolved;
 };
 static struct ndb_offsets g_ndb = {
     .a_cd = NDB_A_CD, .a_fd = NDB_A_FD, .a_dd_0 = NDB_A_DD_0,
     .a_cu = NDB_A_CU, .a_fu = NDB_A_FU, .a_du_1 = NDB_A_DU_1,
+    .d_a5mode = NDB_D_A5MODE, .a_kc = NDB_A_KC,
     .resolved = false,
 };
 
@@ -336,6 +339,11 @@ static void shunt_ndb_resolve_offsets(void)
         { "a_cu",   &g_ndb.a_cu,   NDB_A_CU   },
         { "a_fu",   &g_ndb.a_fu,   NDB_A_FU   },
         { "a_du_1", &g_ndb.a_du_1, NDB_A_DU_1 },
+        /* Le chiffrement passe par les memes offsets que le reste : un a_kc
+         * suppose donnerait une CLE FAUSSE, qui ne leve aucune erreur — elle
+         * dechiffre en bruit, et le CRC accuse la radio. */
+        { "d_a5mode", &g_ndb.d_a5mode, NDB_D_A5MODE },
+        { "a_kc",     &g_ndb.a_kc,     NDB_A_KC     },
     };
     int got = 0, diff = 0;
     char line[256];
@@ -2006,10 +2014,87 @@ uint16_t calypso_dsp_shunt_rssi_apm(void)
     return calypso_trf6151_apm_for_rf(rfi);
 }
 
+
+/* ── PUBLICATION DU Kc : L'ETAT REEL DE LA COUCHE 1 ──────────────────────────
+ * Le pont (pont.py, kc_read) a besoin de savoir si la L1 chiffre, et avec quoi.
+ * Trois sources avaient ete essayees, toutes fausses :
+ *   - l1ctl_sock.c espionne L1CTL_CRYPTO_REQ : chemin MORT, le socket l1ctl de
+ *     QEMU est orphelin (le mobile parle a osmocon) ;
+ *   - osmocon ecrit bien la cle, mais l'EFFACE sur DM_EST_REQ — donc en plein
+ *     milieu d'une session chiffree des que le mobile ouvre un lien de plus
+ *     (SAPI 3 du SMS). Le pont a tente trois marqueurs pour deviner quand
+ *     reprendre la cle : le seq de dcch_cfg, la SABM montante, l'IMMEDIATE
+ *     ASSIGNMENT. Les trois se sont reveles faux, parce qu'ils DEVINENT.
+ *
+ * Ici on ne devine pas : d_a5mode et a_kc sont ce que le FIRMWARE a charge dans
+ * le DSP (calypso/dsp.c:dsp_load_ciph_param). C'est l'etat de chiffrement
+ * effectif de la couche 1, pose par celui qui chiffre, et remis a zero par
+ * lui-meme quand il repart en clair. Il n'y a plus rien a compenser.
+ *
+ * L'ORDRE DES OCTETS EST UN PIEGE. Le firmware range la cle a l'envers, et par
+ * mots :  a_kc[0] = key[7] | key[6]<<8  ...  a_kc[3] = key[1] | key[0]<<8.
+ * Il faut donc defaire les DEUX inversions. Se tromper ne produit aucune
+ * erreur : osmo_a5 accepte n'importe quels 8 octets et rend un keystream. Le
+ * trafic se « dechiffre » alors en bruit, et le CRC accuse la radio.
+ *
+ * CADENCE. Appele au tick de trame (~4,615 ms) mais ne republie qu'une fois sur
+ * PUB_EVERY, soit ~100 ms — la meme fenetre que le cache KC_TTL du pont.
+ * calypso_kc_publish() est idempotent : reaffirmer le meme etat n'ecrit rien et
+ * ne bouge pas le seq. */
+#define SHUNT_KC_PUB_EVERY 22
+
+static void shunt_publish_kc(void)
+{
+    static int tick = 0;
+    if (++tick < SHUNT_KC_PUB_EVERY)
+        return;
+    tick = 0;
+
+    uint16_t *d = (g_shunt.c54x && g_shunt.c54x->data) ? g_shunt.c54x->data : NULL;
+    if (!d)
+        return;
+
+    uint16_t mode = d[ndb_w(g_ndb.d_a5mode)];
+    uint8_t  kc[8];
+    unsigned base = ndb_w(g_ndb.a_kc);
+
+    for (int i = 0; i < 4; i++) {
+        uint16_t w = d[base + (unsigned)i];
+        kc[6 - 2 * i] = (uint8_t)(w >> 8);
+        kc[7 - 2 * i] = (uint8_t)(w & 0xFF);
+    }
+
+    /* Une cle toute a zero avec un mode non nul est incoherente : le firmware a
+     * pose le mode mais pas (encore) la cle. On publie « en clair » plutot
+     * qu'une cle nulle — chiffrer avec des zeros serait pire que ne pas
+     * chiffrer, parce que ca marche silencieusement de travers. */
+    int kc_nul = 1;
+    for (int i = 0; i < 8; i++)
+        if (kc[i]) { kc_nul = 0; break; }
+
+    uint8_t algo = (mode >= 1 && mode <= 3 && !kc_nul) ? (uint8_t)mode : 0;
+    uint32_t seq = calypso_kc_publish(algo, kc, 8, 0xFF);
+
+    /* Journalise le CHANGEMENT, pas la reaffirmation : le seq ne bouge que
+     * quand l'etat change reellement. */
+    static uint32_t last_seq = 0;
+    if (seq && seq != last_seq) {
+        last_seq = seq;
+        if (algo)
+            SHUNT_LOG("KC : A5/%u actif, Kc=%02x%02x%02x%02x%02x%02x%02x%02x "
+                      "(NDB d_a5mode@0x%03x a_kc@0x%03x, seq=%u)\n",
+                      algo, kc[0], kc[1], kc[2], kc[3], kc[4], kc[5], kc[6], kc[7],
+                      g_ndb.d_a5mode, g_ndb.a_kc, seq);
+        else
+            SHUNT_LOG("KC : couche 1 EN CLAIR (d_a5mode=%u, seq=%u)\n", mode, seq);
+    }
+}
+
 void calypso_dsp_shunt_on_frame_tick(void)
 {
     if (!g_shunt.active)
         return;
+    shunt_publish_kc();    /* etat de chiffrement REEL de la L1 -> /dev/shm/calypso_kc */
     shunt_poll_si_shm();   /* gr-gsm a-t-il ecrit un nouveau SI dans le shm ? */
     calypso_tch_dl_poll(); /* nouvelle trame FR DL dans le sideband ? (toujours, hors gate pending) */
     shunt_poll_tch_cfg();  /* canal dedie TCH arme/libere par si_bridge (ASSIGNMENT COMMAND) */
