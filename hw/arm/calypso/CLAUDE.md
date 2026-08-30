@@ -1,0 +1,94 @@
+# Calypso HW — C54x DSP Emulator Context
+
+## Debug pattern : gdb-stub vs DSP API RAM
+
+**Finding 2026-05-26** : le gdb-stub QEMU **skip silencieusement les writes**
+vers les regions `memory_region_init_io` (par design : un debugger ne doit
+pas trigger des effets de bord IO). Les reads marchent. Les writes vers une
+adresse `IO`-typed sont **droppes sans erreur** par `address_space_rw_debug`.
+
+Verification :
+1. `gdb writemem(0xFFD003A0, 30B)` returns `True` (mensonge)
+2. HMP `xp/30bx 0xffd003a0` = unchanged
+3. `gdb readmem(0xFFD003A0)` = unchanged
+4. Test sur XRAM `0x01000000` (RAM type) = write OK, persistant
+5. Counter `DSP WR` dans qemu.log = inchange apres gdb write
+   -> `calypso_dsp_write` callback **non invoque** par gdb
+
+**Consequence pour scripts inject (`inject.py`, `verify_si_inject.py`, etc.)** :
+les writes via gdb-stub vers le DSP API RAM (`0xFFD00000..0xFFD009C8`) ne
+fonctionnent **PAS**. Cela inclut tous les writes vers `d_fb_det`, `a_cd[]`,
+`a_sync_demod[]`, etc.
+
+**Workarounds possibles** (sans hack) :
+- (a) Convertir le DSP API region de `init_io` en `init_ram` (backing store
+  reel). Garder les hooks via une seconde MemoryRegion overlay typed-IO
+  qui shadow les writes pour mirror dans `dsp->data`.
+- (b) Exposer un side-channel d'inject explicite (UNIX socket dedicated
+  pour `calypso_dsp_write_external(addr, value)`).
+- (c) HMP halt + manipuler la memory via le code QEMU directement (= mod
+  ds le runtime).
+
+L'option (a) est la plus standard. Voir TODO.md pour le plan.
+
+**Combo HMP+GDB pour debug** : pour halt **tous** les CPUs (ARM + c54x emule),
+utiliser HMP `stop` via `/tmp/qemu-calypso-mon.sock`. GDB seul halt l'ARM
+mais pas le c54x.
+
+## Opcode Debug Workflow
+
+1. Find the suspect opcode value (from boot trace or PC HIST)
+2. Check `tic54x-opc.c` in binutils: `grep "0xXX" /home/nirvana/gnuarm/src/binutils-2.21.1/opcodes/tic54x-opc.c`
+3. Cross-reference with SPRU172C (TMS320C54x instruction set)
+4. Fix in `calypso_c54x.c` in `c54x_exec_one()` switch
+5. Build, run, check DSP IDLE + SP + IMR
+
+## ROM Reader
+
+```bash
+bash ${GSM_ROOT}/dsp_read.sh <section> <addr_hex>
+# Sections: regs, drom, pdrom, prom0, prom1, prom2, prom3
+# Example: bash ${GSM_ROOT}/dsp_read.sh prom0 0x770C
+```
+
+## DSP Boot Trace Format
+
+```
+[c54x] BOOT[phase.step] PC=0xXXXX op=0xXXXX SP=0xXXXX A=... B=...
+```
+- phase 1 = first boot, phase 2 = second boot (after DSP_DL_STATUS_READY)
+- Check SP changes to detect stack corruption
+- SP should stay near 0x5AC8 during boot
+
+## C54x Addressing Modes (resolve_smem)
+
+- Bit 7 = 0: Direct addressing → (DP << 7) | (op & 0x7F)
+- Bit 7 = 1: Indirect → modes 0x0-0xF with AR[ARP]
+- Modes 0xC-0xF: lk_used = consume extra word from prog
+
+## Critical DSP State at IDLE
+
+Healthy boot produces:
+```
+IDLE @0x770C INTM=1 IMR=0xFFFF SP=0x5AC8
+```
+If IMR=0x0000: init code was skipped (opcode bug caused branch over init)
+If SP < 0x5000: stack overflow (opcode doing spurious PUSH/CALL)
+
+## Firmware Symbols (from nm)
+
+| Symbol | Address | Purpose |
+|--------|---------|---------|
+| main | 0x820190 | ARM main loop |
+| l1a_l23_handler | 0x823f9c | L1CTL message dispatch |
+| l1s_pm_test | 0x825424 | Schedule PM in TDMA |
+| l1s_fbsb_req | 0x826778 | Schedule FB/SB |
+| l1s_fbdet_cmd | 0x8262cc | Write d_task_md=5 |
+| l1a_compl_execute | 0x825180 | Main loop completions |
+| sim_handler | 0x82266c | SIM (patched to BX LR) |
+| tdma_sched_execute | 0x828ef8 | TDMA scheduler |
+| sercomm | 0x832428 | Sercomm state |
+| dsp_api | 0x82f9c4 | DSP API pointers |
+| l1s | 0x836508 | L1S state |
+| fbs | 0x8307ec | FBSB state |
+| l23_rx_queue | 0x82f854 | L1CTL RX queue |
