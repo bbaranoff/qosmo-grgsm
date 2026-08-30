@@ -21,12 +21,22 @@ mod_qemu_check() {
                                 mod_hint "compilez-le : ./configure --target-list=arm-softmmu && ninja -C build qemu-system-arm"
                                 return $MOD_RC_FAIL; }
     [ -r "${FIRMWARE_ELF:-}" ] || { mod_fail "firmware ARM introuvable : ${FIRMWARE_ELF:-<non défini>}"; return $MOD_RC_FAIL; }
-    local r
-    for r in "$DSP_PROM0" "$DSP_PROM1" "$DSP_PROM2" "$DSP_PROM3" "$DSP_DROM" "$DSP_PDROM"; do
-        [ -r "$r" ] || { mod_fail "ROM du DSP manquante : $r"
-                         mod_hint "les six binaires du DSP sont indispensables au démarrage"
-                         return $MOD_RC_FAIL; }
-    done
+    # ── LES ROM DU DSP NE SONT PLUS UN PREREQUIS ───────────────────────────
+    # Ce garde-fou exigeait les six binaires du DSP et arretait le module sur
+    # "ROM du DSP manquante : ...". Il etait juste tant que le TMS320C54x etait
+    # emule pour de bon. Il ne l'est plus : gr-gsm demodule reellement, et les
+    # journaux du banc le disent en clair - "DISPATCH SB ... (gr-gsm REEL)".
+    #
+    # LE GARDE-FOU ET LES ARGS PARTENT ENSEMBLE, ou pas du tout. Retirer les
+    # options -M calypso,dsp-prom* en laissant ce test donnerait un module qui
+    # reclame des fichiers que plus personne ne charge ; retirer le test en
+    # laissant les args donnerait un QEMU qui echoue plus loin, sur un chemin
+    # illisible. C'est le meme geste.
+    #
+    # L'absence de ROM n'est pas une panne : calypso_trx.c porte "explicit ROM
+    # loading only" et journalise "DSP ROM mode: NONE - empty prog[]/data[]".
+    # C'est un TRX_LOG, pas un abort - la machine demarre avec un DSP vide.
+    :
     mod_ok
 }
 
@@ -123,10 +133,16 @@ _qemu_log_guard() {
 
 mod_qemu_start() {
     [ "${CALYPSO_BRIDGE:-}" = ipc ] && { mod_skip "CALYPSO_BRIDGE=ipc : MS#1 via osmo-trx-ms-ipc, firmware qemu non lance"; return $MOD_RC_SKIP; }
+    # La machine, SANS ses ROM de DSP : plus de dsp-prom0..3, dsp-drom,
+    # dsp-pdrom ni dsp-registers. Voir mod_qemu_check ci-dessus pour le
+    # pourquoi - et pour la raison qui interdit de defaire l'un sans l'autre.
+    # CALYPSO_DSP_ROMS=1 les remet, le temps d'une comparaison A/B.
     local mach="calypso"
-    mach="$mach,dsp-prom0=$DSP_PROM0,dsp-prom1=$DSP_PROM1,dsp-prom2=$DSP_PROM2"
-    mach="$mach,dsp-prom3=$DSP_PROM3,dsp-drom=$DSP_DROM,dsp-pdrom=$DSP_PDROM"
-    mach="$mach,dsp-registers=$DSP_REGISTERS"
+    if [ "${CALYPSO_DSP_ROMS:-0}" = "1" ]; then
+        mach="$mach,dsp-prom0=$DSP_PROM0,dsp-prom1=$DSP_PROM1,dsp-prom2=$DSP_PROM2"
+        mach="$mach,dsp-prom3=$DSP_PROM3,dsp-drom=$DSP_DROM,dsp-pdrom=$DSP_PDROM"
+        mach="$mach,dsp-registers=$DSP_REGISTERS"
+    fi
     local qlog="${LOG_DIR}/qemu.log"
     mod_say "machine  : $mach"
     mod_say "journal  : $qlog (plafond ${QEMU_LOG_MAX} o)"

@@ -39,8 +39,14 @@ MOD_TIMEOUT[grgsm-decode]=30
 MOD_ENABLED_IF[grgsm-decode]='[ "${CALYPSO_PIPELINE:-full-grgsm}" = full-grgsm ] || [ "${CALYPSO_FORCE_DEMOD_BRIDGE:-0}" = 1 ]'
 
 : "${CALYPSO_GRGSM_DECODER:=si-bridge}"
-: "${CALYPSO_SI_BRIDGE_LOOP:=${QEMU_TREE:-${QEMU_TREE}}/opt-gsm-scripts/si_bridge_loop.sh}"
-: "${CALYPSO_RELAY_DECODE:=${QEMU_TREE:-${QEMU_TREE}}/opt-gsm-scripts/grgsm_relay_decode.py}"
+# ${QEMU_TREE:-${QEMU_TREE}} : le repli d'une variable SUR ELLE-MEME. Si
+# QEMU_TREE est vide, le repli l'est aussi - et le chemin devient
+# "/opt-gsm-scripts/si_bridge_loop.sh", a la racine, ou il n'existe pas. Le
+# module sort alors sur "decodeur absent" (un mod_skip, pas un echec) et le
+# banc tourne SANS decodage gr-gsm, en silence. On replie sur le chemin reel.
+: "${QEMU_TREE:=/opt/GSM/qosmo-grgsm}"
+: "${CALYPSO_SI_BRIDGE_LOOP:=${QEMU_TREE}/opt-gsm-scripts/si_bridge_loop.sh}"
+: "${CALYPSO_RELAY_DECODE:=${QEMU_TREE}/opt-gsm-scripts/grgsm_relay_decode.py}"
 : "${CALYPSO_GRGSM_FIFO:=/tmp/iq_grgsm.fifo}"
 : "${CALYPSO_RECORD_FILE:=/dev/shm/record.cfile}"
 # Seuil « la pile est assez remplie pour décoder », en octets. Remplace la durée
@@ -64,6 +70,29 @@ _grgsm_ring_ok() {
 
 mod_grgsm_decode_check() {
     local sc; sc="$(_grgsm_script)"
+    # ── UN SEUL PRODUCTEUR SUR GSMTAP 4731 ─────────────────────────────
+    # Le pont publie le SCH (BSIC + FN) sur 4731 : c'est ecrit dans pont.py
+    # ("PORT_SCH = 4731", et "SCH -> feed_sb (4731)"). Le decodeur en mode
+    # `relay` publie EXACTEMENT la meme chose sur le meme port
+    # ("SI (4730) + BSIC/FN reels (4731)", en-tete de ce fichier).
+    #
+    # Deux producteurs pour une meme donnee, sur un socket UDP : le shunt prend
+    # ce qui arrive en dernier. Rien ne plante, rien ne se plaint - le BSIC et
+    # le FN se mettent simplement a osciller entre deux sources, et le mobile
+    # perd la synchronisation par intermittence. C'est le genre de panne qu'on
+    # attribue a la radio pendant des heures.
+    #
+    # ARBITRAGE : le PONT gagne. Il est le transport de bout en bout (voie A,
+    # L2 via libosmocoding) et il tient deja le SCH ; gr-gsm reste sur la
+    # DEMODULATION, qu'il publie sur 4730 en mode si-bridge. Les deux sont
+    # orthogonaux tant que chacun garde son port.
+    if [ "${CALYPSO_BRIDGE:-}" = pont ] && [ "$CALYPSO_GRGSM_DECODER" = relay ]; then
+        mod_say "CALYPSO_BRIDGE=pont : le pont publie deja le SCH sur 4731"
+        mod_say "decodeur bascule ${CALYPSO_GRGSM_DECODER} -> si-bridge (4730 seul, pas de collision)"
+        CALYPSO_GRGSM_DECODER=si-bridge
+        export CALYPSO_GRGSM_DECODER
+    fi
+
     case "$CALYPSO_GRGSM_DECODER" in
         si-bridge|relay) ;;
         *) mod_hint "valeurs acceptées : si-bridge | relay"

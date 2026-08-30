@@ -41,7 +41,14 @@ MOD_TIMEOUT[profil]=10
 # Ajouter un mode dans le `case` seul ne suffit PAS — le garde-fou le rejette
 # avant, avec « CALYPSO_MODE inconnu », alors que le profil est bel et bien écrit.
 # Vécu le 03/08 en ajoutant native_twl_host_demod. Les trois doivent bouger ensemble.
-: "${CONFIG_MODES_CONNUS:=empty none bare shunt_legit shunt_legit_no_inject native native_twl native_twl_host_demod native_helped}"
+# UN SEUL MODE. Cette liste declarait les neuf profils historiques ; huit
+# d'entre eux ont ete retires avec l'emulation du DSP (voir
+# environnement/modes.env). La laisser telle quelle ferait ACCEPTER par ce
+# controle un CALYPSO_MODE que modes.env ne sait plus poser : le module
+# passerait au vert, aucun profil ne serait applique, et le banc partirait
+# avec les seuls defauts epars des autres .env - la panne exacte que ce
+# controle existe pour attraper.
+: "${CONFIG_MODES_CONNUS:=shunt_legit}"
 
 mod_profil_check() {
     local m="${CALYPSO_MODE:-}" connu=0 x
