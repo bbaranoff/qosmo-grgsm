@@ -925,6 +925,20 @@ static unsigned shunt_parse_canned(void)
     if (!e)                                          return CAN_DEFAULT;  /* var ABSENTE = défaut (= rien canné, tout réel) */
     if (!*e || can_tok_eq(e, "NONE"))                return 0;            /* "=" vide EXPLICITE = RIEN canné */
     if (can_tok_eq(e, "FULL") || can_tok_eq(e, "ALL")) return CAN_ALL;
+    /* ── LES BOOLEENS SONT ACCEPTES, ET C'EST UN CORRECTIF ─────────────────
+     * [2026-08-30] start-direct.sh posait CALYPSO_CANNED=1 depuis toujours.
+     * "1" n'etait aucun des jetons attendus : il tombait dans le `else` plus
+     * bas, sortait un « token inconnu '1' ignore » noye dans le demarrage, et
+     * le masque restait VIDE. Le banc a donc tourne avec RIEN de canne pendant
+     * que sa configuration affichait l'inverse -- mesure du 30/08 :
+     *     CALYPSO_CANNED (dette fabriquee) : FBDET=0 TOA=0 PM=0 SNR=0 ANGLE=0 CRC=0
+     * Une variable booleenne qui veut dire « rien » au lieu de « tout » est un
+     * piege : on l'accepte explicitement dans les deux sens plutot que de la
+     * laisser echouer en silence. */
+    if (can_tok_eq(e, "1") || can_tok_eq(e, "ON") ||
+        can_tok_eq(e, "YES") || can_tok_eq(e, "TRUE"))  return CAN_ALL;
+    if (can_tok_eq(e, "0") || can_tok_eq(e, "OFF") ||
+        can_tok_eq(e, "NO") || can_tok_eq(e, "FALSE"))  return 0;
     char buf[160];
     strncpy(buf, e, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = 0;
@@ -2073,7 +2087,10 @@ static void shunt_publish_kc(void)
         if (kc[i]) { kc_nul = 0; break; }
 
     uint8_t algo = (mode >= 1 && mode <= 3 && !kc_nul) ? (uint8_t)mode : 0;
-    uint32_t seq = calypso_kc_publish(algo, kc, 8, 0xFF);
+    /* Fichier AUTORITAIRE, separe : osmocon ne le connait pas et ne peut donc
+     * pas l ecraser. C est la seule facon de tenir face a un ecrivain qu on ne
+     * controle pas. */
+    uint32_t seq = calypso_kc_publish_l1(algo, kc, 8, 0xFF);
 
     /* Journalise le CHANGEMENT, pas la reaffirmation : le seq ne bouge que
      * quand l'etat change reellement. */

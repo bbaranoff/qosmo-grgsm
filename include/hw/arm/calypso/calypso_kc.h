@@ -45,7 +45,31 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define CALYPSO_KC_PATH   "/dev/shm/calypso_kc"
+/*
+ * DEUX CHEMINS, ET C'EST LE COEUR DU CORRECTIF.
+ *
+ * Un format commun ne regle pas une COURSE. Il y a au moins trois ecrivains sur
+ * /dev/shm/calypso_kc :
+ *   1. osmocon      hors de ce depot, incontrolable d'ici, et il ECRASE le
+ *                   fichier avec 32 zeros sur DM_EST_REQ -- y compris en pleine
+ *                   session chiffree, des que le mobile ouvre un lien de plus ;
+ *   2. l1ctl_sock.c le chemin espion L1CTL, mort dans cette configuration ;
+ *   3. le shunt DSP la verite terrain (d_a5mode / a_kc du NDB).
+ * Sans arbitrage, le DERNIER qui ecrit gagne -- et c'est l'effaceur. Mesure :
+ * fichier a 32 zeros, « A5=non » sur tout le canal dedie, appel mort.
+ *
+ * On ne peut pas faire cooperer osmocon. On cesse donc de PARTAGER le fichier :
+ * la source autoritaire publie dans un fichier a elle, qu'aucun autre ecrivain
+ * ne connait. Le lecteur (pont.py) le prefere, et ne retombe sur l'historique
+ * que s'il est absent. La course disparait au lieu d'etre arbitree.
+ *
+ *   CALYPSO_KC_PATH     historique, partage, ecrase par osmocon
+ *   CALYPSO_KC_L1_PATH  autoritaire : l'etat de chiffrement REEL de la L1,
+ *                       ecrit par le seul shunt. Un algo=0 venu de LA veut
+ *                       vraiment dire « en clair », et se croit.
+ */
+#define CALYPSO_KC_PATH    "/dev/shm/calypso_kc"
+#define CALYPSO_KC_L1_PATH "/dev/shm/calypso_kc_l1"
 #define CALYPSO_KC_RECLEN 32
 
 /*
@@ -57,6 +81,61 @@
  * on ne touche pas au seq. Un lecteur peut donc se fier au seq pour detecter un
  * VRAI changement, et non la simple reaffirmation periodique de la meme cle.
  */
+static inline uint32_t calypso_kc_publish_to(const char *path,
+                                            uint8_t algo, const uint8_t *kc,
+                                            uint8_t klen, uint8_t cksn,
+                                            int *fdp, uint32_t *seqp,
+                                            uint8_t *last, int *have_last)
+{
+    int      *fdslot = fdp;
+    uint32_t *seq    = seqp;
+    uint8_t   rec[CALYPSO_KC_RECLEN];
+
+    if (algo < 1 || algo > 3 || !kc || klen == 0) {
+        algo = 0; klen = 0;
+    }
+    if (klen > 8) klen = 8;
+
+    memset(rec, 0, sizeof(rec));
+    rec[4] = algo;
+    rec[5] = klen;
+    if (algo && klen)
+        memcpy(rec + 6, kc, klen);
+    rec[14] = cksn;
+
+    if (*have_last && !memcmp(last + 4, rec + 4, CALYPSO_KC_RECLEN - 4))
+        return *seq;
+
+    if (*fdslot < 0) {
+        *fdslot = open(path, O_WRONLY | O_CREAT, 0666);
+        if (*fdslot < 0)
+            return 0;
+    }
+    (*seq)++;
+    memcpy(rec, seq, 4);
+    if (pwrite(*fdslot, rec, sizeof(rec), 0) != (ssize_t)sizeof(rec)) {
+        close(*fdslot);
+        *fdslot = -1;
+        (*seq)--;
+        return 0;
+    }
+    memcpy(last, rec, sizeof(rec));
+    *have_last = 1;
+    return *seq;
+}
+
+/* Source AUTORITAIRE : le NDB du DSP. Fichier a elle seule. */
+static inline uint32_t calypso_kc_publish_l1(uint8_t algo, const uint8_t *kc,
+                                             uint8_t klen, uint8_t cksn)
+{
+    static int      fd = -1;
+    static uint32_t seq = 0;
+    static uint8_t  last[CALYPSO_KC_RECLEN];
+    static int      have_last = 0;
+    return calypso_kc_publish_to(CALYPSO_KC_L1_PATH, algo, kc, klen, cksn,
+                                 &fd, &seq, last, &have_last);
+}
+
 static inline uint32_t calypso_kc_publish(uint8_t algo, const uint8_t *kc,
                                           uint8_t klen, uint8_t cksn)
 {
