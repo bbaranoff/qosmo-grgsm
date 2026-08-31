@@ -116,14 +116,42 @@ _td_sockets() {
                   "${IPC_MSOCK_PATH:-/tmp/ipc_sock0}_0"
 }
 
+# ── UN ZOMBIE N'EST PAS UN RESTE ────────────────────────────────────────────
+# [2026-08-31] `pgrep -x mobile` compte AUSSI les processus <defunct>. Un zombie
+# est deja mort : il ne tient aucun port, aucun socket, aucun fichier — il
+# n'occupe qu'une entree dans la table des processus, en attendant que son
+# parent l'appelle. Aucun signal ne l'enleve, `pkill -9` compris.
+#
+# Consequence exacte, vue le 31/08 : le mobile d'un run precedent avait laisse
+# un [mobile] <defunct> retenu par un `tmux attach -t calypso`. Le teardown
+# bouclait alors
+#     kill -x mobile ... restes apres 12 s : mobile — deuxieme passe
+#     [FAIL] restes du run precedent : mobile
+# et abandonnait la sequence A CHAQUE lancement, indefiniment — alors qu'il n'y
+# avait RIEN a nettoyer. Le conseil affiche ("identifiez le tenace : pgrep -a -f")
+# menait droit dans le mur : le processus est bien la, et le tuer est impossible.
+#
+# On ne retient donc que les processus dont l'etat n'est pas Z.
+_td_live() {   # $1 = -x|-f, $2 = motif ; 0 s'il reste au moins un VIVANT
+    local _p _st
+    for _p in $(pgrep "$1" "$2" 2>/dev/null); do
+        _st="$(ps -o stat= -p "$_p" 2>/dev/null | tr -d ' ')"
+        case "$_st" in
+            ''|Z*) continue ;;   # disparu entre-temps, ou zombie
+            *)     return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Ce qui reste debout, sous forme lisible — sert au message d'échec.
 _td_leftovers() {
     local line kind pat out="" p
     while IFS= read -r line; do
         kind="${line%%:*}"; pat="${line#*:}"
         case "$kind" in
-            x) pgrep -x "$pat" >/dev/null 2>&1 && out="$out $pat" ;;
-            f) pgrep -f "$pat" >/dev/null 2>&1 && out="$out $pat" ;;
+            x) _td_live -x "$pat" && out="$out $pat" ;;
+            f) _td_live -f "$pat" && out="$out $pat" ;;
         esac
     done < <(_td_patterns)
     while IFS= read -r p; do
@@ -160,8 +188,8 @@ _td_kill_all() {
     while IFS= read -r line; do
         kind="${line%%:*}"; pat="${line#*:}"
         case "$kind" in
-            x) pgrep -x "$pat" >/dev/null 2>&1 && { mod_say "kill -x $pat"; pkill -9 -x "$pat" 2>/dev/null; } ;;
-            f) pgrep -f "$pat" >/dev/null 2>&1 && { mod_say "kill -f $pat"; pkill -9 -f "$pat" 2>/dev/null; } ;;
+            x) _td_live -x "$pat" && { mod_say "kill -x $pat"; pkill -9 -x "$pat" 2>/dev/null; } ;;
+            f) _td_live -f "$pat" && { mod_say "kill -f $pat"; pkill -9 -f "$pat" 2>/dev/null; } ;;
         esac
     done < <(_td_patterns)
     return 0
