@@ -36,6 +36,40 @@
  * dechiffrer. On garde UN descripteur ouvert et on repose les 32 octets par un
  * seul pwrite a l'offset 0 : la taille ne varie jamais, un lecteur voit
  * toujours un enregistrement entier.
+ *
+ * LES LECTEURS, ET CE QU'ILS DOIVENT EN FAIRE  [2026-08-31]
+ * --------------------------------------------------------
+ * REGLE UNIQUE : l'autoritaire (_l1) d'abord ; l'historique SEULEMENT s'il est
+ * ABSENT. Une fois _l1 elu on n'en redescend jamais -- un algo=0 venu de LUI dit
+ * vraiment « en clair » et se croit. Melanger les deux, c'est reintroduire la
+ * course qu'on vient de supprimer.
+ *
+ * L'HISTORIQUE N'A PLUS D'ECRIVAIN. Le patch osmocon a ete retire le 30/08
+ * (osmo-operator/Dockerfile:242) et l1ctl_sock.c est orphelin : /dev/shm/calypso_kc
+ * n'est plus cree du tout. Mesure du 31/08 dans osmo-operator-2 et -3 : seul
+ * calypso_kc_l1 existe. Le repli n'est donc conserve que pour un binaire QEMU
+ * pas reconstruit.
+ *
+ * L'ENREGISTREMENT EST TRANSITOIRE, ET C'EST VOULU. Le shunt republie l'etat
+ * REEL de la L1 : algo=1 pendant le canal dedie chiffre, puis algo=0 des que le
+ * firmware repasse en clair. Releve du 31/08, un seul run :
+ *     seq=1 EN CLAIR -> seq=2 A5/1 Kc=c7d20e13126d0c00 -> seq=3 EN CLAIR
+ * Un lecteur qui echantillonne trouve donc des zeros la PLUPART du temps. Zero
+ * veut dire « en clair MAINTENANT », jamais « pas de cle de la session ».
+ * Qui a besoin de la cle APRES coup (dechiffrement differe, dashboard) doit
+ * retenir le dernier non-nul -- ou la demander au mobile, qui la garde :
+ *     $ echo 'show subscriber' | nc 127.0.0.1 4247
+ *       Key: sequence 0  c7 d2 0e 13 12 6d 0c 00
+ * (osmocom-bb common/vty.c:241 -> subscriber.c:518. Meme valeur que le shunt,
+ * verifie le 31/08, et TOUJOURS la quand le fichier est deja remis a zero.)
+ *
+ * ⚠️ NE PAS "NORMALISER" LES LECTEURS SANS MESURER. si_bridge.py (read_kc) et
+ * tools/calypso-ipc-device/qemu_wrap.c (calypso_kc_read) lisent encore
+ * l'historique SEUL, donc rendent toujours 0. Ce n'est pas un oubli benin : chez
+ * si_bridge, read_kc() commande le spawn/kill du grgsm CHIFFRE (boucle 0,5 s).
+ * Le basculer sur _l1 ferait apparaitre et disparaitre ce decodeur a chaque
+ * transition de chiffrement. C'est un changement de comportement du pipeline, a
+ * mesurer pour lui-meme -- pas un alignement de chemin.
  */
 #ifndef HW_ARM_CALYPSO_KC_H
 #define HW_ARM_CALYPSO_KC_H

@@ -40,6 +40,12 @@
 #     /dev/shm/calypso_kc survit à l'arrêt de la pile. Réutilisé au run suivant,
 #     le SABM montant part chiffré avec une clé que le réseau n'a plus : la
 #     Location Update fraîche échoue sans message clair. On l'efface.
+#     [2026-08-31] ET /dev/shm/calypso_kc_l1 AVEC LUI. Seul l'historique était
+#     effacé ; le fichier autoritaire du shunt survivait au run. Tant que
+#     personne ne le lisait, ça ne se voyait pas — mais pont.py le préfère
+#     (pont.py:165) et le serveur web aussi depuis aujourd'hui. Ne nettoyer que
+#     l'un des deux, c'est déplacer la panne du POURQUOI 4 sur l'autre fichier :
+#     la clé du run précédent, présentée comme la vérité terrain de la L1.
 # -----------------------------------------------------------------------------
 
 MOD_REGISTER teardown "Nettoyage du run précédent"
@@ -251,7 +257,7 @@ mod_teardown_start() {
     while IFS= read -r p; do rm -f "$p" 2>/dev/null; done < <(_td_sockets)
     rm -f /tmp/osmocom_l2_* /tmp/irda.pty.link /tmp/irda_peer.pid 2>/dev/null
     rm -f /dev/shm/calypso_si.bin 2>/dev/null
-    rm -f /dev/shm/calypso_kc 2>/dev/null            # cf. POURQUOI 4
+    rm -f /dev/shm/calypso_kc /dev/shm/calypso_kc_l1 2>/dev/null   # cf. POURQUOI 4
     # ⛔ NE PAS EFFACER /dev/shm/pont.log ICI — essaye le 16/08, REVERTE le jour
     # meme. start-direct.sh ouvre la redirection `> /dev/shm/pont.log` AVANT de
     # passer la main a run.sh : quand ce teardown s'execute, le lanceur differe
