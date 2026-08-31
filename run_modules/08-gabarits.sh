@@ -120,11 +120,31 @@ mod_gabarits_start() {
     mod_say "opérateur $OPERATOR_ID · MCC/MNC ${MCC}/${MNC} · chiffrement « ${ENCRYPTION} »"
     mod_say "gabarits  : $EGPRS_DIR/configs -> ${OSMOCOM_CFG:-/etc/osmocom}, /etc/asterisk, $HOME/.osmocom/bb"
 
-    # Mono-opérateur : pas de backbone inter-op, l'ASP vers l'inter-STP reste
-    # 'shutdown' — argument à l'identique de run_single_op (legacy L1071/L1119).
+    # ── L'ASP VERS L'INTER-STP : ÉTEINT SEULEMENT S'IL N'Y A PAS DE HUB ─────
+    # [2026-08-31] Cet argument valait "shutdown" EN DUR, avec pour raison
+    # « mono-opérateur : pas de backbone inter-op ». C'était vrai quand le natif
+    # tournait seul. Ça ne l'est plus sur le banc multi-opérateur, où un
+    # inter-STP tourne en conteneur et publie son 2908 en SCTP sur la boucle
+    # locale : le natif A un hub, et son ASP doit donc être ACTIF.
+    #
+    # Le symptôme n'accusait jamais la bonne chose. L'ASP restait en
+    #     Applying Adm State change: ENABLED -> SHUTDOWN
+    #     Skipping start for ASP in administrative state SHUTDOWN
+    # donc aucune tentative de connexion, aucune erreur réseau, rien dans le
+    # journal. En aval : as-inter AS_DOWN, route 0.0.0/0 UNAVAIL, et la matrice
+    # de connectivité qui donnait Op1 en FAIL vers tout le monde. On cherchait
+    # une adresse, un port ou un pare-feu — l'ASP était simplement débranché.
+    #
+    # La topologie fait foi : si osmo-multi.conf déclare un hub, on n'éteint
+    # pas. Sans ce fichier, rien ne change — le natif seul garde son shutdown.
+    local _inter_shutdown="shutdown" _multi="/etc/osmocom/osmo-multi.conf"
+    if [ -r "$_multi" ] && grep -q '^MULTI_HUB_IP=' "$_multi" 2>/dev/null; then
+        _inter_shutdown=""
+        mod_say "inter-STP déclaré (osmo-multi.conf) : ASP as-inter laissé ACTIF"
+    fi
     if apply_config_templates "$tmpdir" "$cip" "$gw" "$OPERATOR_ID" \
             "1.1.1" "1.1.2" "1.1.3" "$MCC" "$MNC" "$OPERATOR_NAME" \
-            "${INTER_STP_IP:-127.0.0.1}" "shutdown" "1"; then
+            "${INTER_STP_IP:-127.0.0.1}" "$_inter_shutdown" "1"; then
         install_configs_native "$tmpdir" "" || rc=1
     else
         rc=1
