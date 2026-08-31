@@ -1121,9 +1121,30 @@ static bool shunt_dcch_si_guard(void)
      * qui ne depend pas de notre decodage. Le TTL RESTE COURT : c est lui qui
      * rend le camp au mobile des la fin du canal, et l allonger l affame --
      * essaye a 30 s le 31/08, 27 lignes de selection de cellule. Le montant
-     * couvre les trous PENDANT le canal ; le TTL tranche APRES. */
+     * couvre les trous PENDANT le canal ; le TTL tranche APRES.
+     *
+     * [2026-08-31, 2e passe] 430 (~2 s) -> 108 (~0,5 s). MESURE : le mobile
+     * perdait le service pendant EXACTEMENT la duree du TTL apres chaque appel
+     *     07:50:48  C6 any cell selection -> C0 null
+     *     07:50:50  C3 camped normally / normal service
+     * soit 11 « no cell available » sur un run. La cause : rien n appelle
+     * jamais set_dcch_active(0), donc la garde ne se leve QUE par peremption --
+     * et depuis qu on bloque les DEUX ecrivains de SI (celui du shunt et
+     * DISPATCH ALLC), plus rien ne nourrit le mobile pendant ce delai. Avant,
+     * la fuite de SI dans a_cd servait de perfusion : en la supprimant on a
+     * expose le delai.
+     *
+     * Raccourcir est possible SANS risque nouveau parce que le montant dedie
+     * rafraichit desormais la garde pendant tout le canal : le TTL n a plus a
+     * absorber les trous de decodage, il ne sert qu apres la fin.
+     *
+     * ⚠️ CE N EST QU UN CADRAN, PAS LA CORRECTION. Le vrai signal serait la
+     * liberation du canal -- le pont la voit (CHANNEL RELEASE sur SDCCH et sur
+     * FACCH) et pourrait la transmettre ; set_dcch_active(0) existe deja et
+     * n est appelee par personne. Tant que ce lien n existe pas, on paie une
+     * demi-seconde de camp perdu apres chaque appel. */
     if (ttl < 0) { const char *e = getenv("CALYPSO_DCCH_SI_GUARD");
-                   ttl = (e && *e) ? atoi(e) : 430; }     /* ~2 s sans aucun signe = canal fini */
+                   ttl = (e && *e) ? atoi(e) : 108; }     /* ~0,5 s sans aucun signe = canal fini */
     if (ttl == 0 || !g_shunt.dcch_guard_armed) return false;
 
     /* [2026-08-09 REVISION] NE PAS SUPPRIMER SANS REMPLACANT.

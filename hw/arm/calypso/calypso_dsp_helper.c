@@ -814,6 +814,32 @@ void shunt_dispatch_allc(uint8_t page_idx)
      *   ATTENTION : le commentaire d'en-tete annonce "defaut 1" — PERIME, le code teste
      *             (e && *e=='1') donc le defaut est OFF.
      */
+    /* ── PAS DE SI DU CAMP SUR UN CANAL DEDIE ───────────────────────────
+     * [2026-08-31] SECOND ECRIVAIN DE a_cd, celui qu'on avait manque. La garde
+     * DCCH ne protegeait que le site « CAMP: a_cd<-SI » du shunt. Ce
+     * dispatch-ci ecrit lui aussi le SI3 du camp dans a_cd[3..14], sans jamais
+     * regarder s'il y a un canal dedie. Le mobile recoit alors, sur son canal
+     * dedie, des blocs BCCH dont l'octet de pseudo-longueur est lu par LAPDm
+     * comme un octet d'adresse : « Received frame for unsupported SAPI ».
+     *
+     * ⚠️ ICI, ET PAS DANS `if (bcch_sched)`. La premiere version de ce
+     * garde-fou etait posee dans ce bloc -- qui est OFF PAR DEFAUT (l. ~820,
+     * « DEFAUT OFF »). Elle etait donc du code mort, et la mesure le montrait
+     * sans ambiguite : 1088 DISPATCH ALLC DANS les fenetres dediees, contre 0
+     * pour l'autre ecrivain. Un garde-fou pose dans une branche optionnelle ne
+     * garde rien.
+     *
+     * On ne presente pas un SI faux : on marque le bloc en ECHEC CRC, ce que le
+     * firmware sait jeter. Meme geste que la garde anti-famine du CCCH. */
+    if (g_shunt.dcch_guard_armed) {
+        uint32_t addr0 = BASE_API_NDB + NDB_A_CD;
+        uint32_t rp_c  = rp_base(page_idx);
+        shunt_write_w(addr0 + 0, 0x0003);              /* a_cd[0] FIRE = CRC fail */
+        shunt_write_w(rp_c + RP_D_TASK_D,  ALLC_DSP_TASK);
+        shunt_write_w(rp_c + RP_D_BURST_D, shunt_burst_echo());
+        return;                        /* canal dedie : le SI n'a rien a y faire */
+    }
+
     static int bcch_sched = -1, bcch_ofs = 0;
     if (bcch_sched < 0) {
         const char *e = getenv("CALYPSO_SHUNT_BCCH_SCHED");
