@@ -53,6 +53,14 @@
 #include "calypso_layer1.h" /* calypso_l1_c_active() : ungate SB/SI (+FB) sous CALYPSO_L1=c */
 #include "hw/arm/calypso/calypso_dsp_internal.h" /* shared state + NDB-write primitives (split) */
 #include "hw/arm/calypso/calypso_kc.h"          /* format + ecrivain unique de /dev/shm/calypso_kc */
+/* Fin de canal dedie : on fait OUBLIER a l1ctl_sock la derniere identite de
+ * canal. Sans cet oubli, un canal suivant qui retombe sur la meme sous-voie
+ * presente le meme chan_nr, le test `chan_nr != last_chan_nr` ne declenche pas,
+ * et le shunt reste configure sur l instance precedente. MESURE (31/08, LU +
+ * deux appels, tous sur SDCCH/8 SS0) : « DCCH # » UNE seule fois pour TROIS
+ * canaux. La garde, elle, cycle juste (4 paires ARMEE/levee) : c est donc elle
+ * qui sait quand un canal se termine, et c est de la qu on previent. */
+extern void calypso_l1ctl_dcch_forget(void);
 extern int g_c54x_int3_src;  /* diag source INT3 (RO) */
 #include <stdbool.h>
 #include <stdint.h>
@@ -680,6 +688,47 @@ static void shunt_latch_task(uint16_t new_d_dsp_page)
      * run 08/08 : 4804 latch task_u=13 et 200 task_u=14, pour 6 SDCCH-UL publies (tous
      * task_u=12). L'ASSIGNMENT COMPLETE ne pouvait donc pas partir, et l'appel mourait
      * en ASSIGNMENT FAILURE (cause #1) six secondes plus tard, MO comme MT. */
+    /* ── LA GARDE DCCH SE RAFRAICHIT SUR LE MONTANT, PAS SUR NOTRE CHANCE ───
+     * [2026-08-31] dcch_guard_tick n etait rafraichi que par le DESCENDANT
+     * (set_dcch_active, appele quand un bloc dedie atteint a_cd). Or ce chemin
+     * depend de NOTRE decodage : sur le run du 30/08, 3 presentations
+     * DCCH-SACCH pour 29 483 dispatches de SI. Entre deux blocs le TTL (~2 s)
+     * expirait, la garde concluait « canal fini », et le SI du camp reprenait
+     * a_cd EN PLEIN CANAL DEDIE. Le mobile lisait alors l octet de
+     * pseudo-longueur d un bloc BCCH comme un octet d adresse LAPDm :
+     *     lapdm.c « Received frame for unsupported SAPI 6! »  (28x, +5/4/2)
+     * -- les SAPI observes sont les L&7 des differents SI. Aucun SACCH n etait
+     * traite : ni rapport de mesure, ni supervision de lien, puis
+     * « Radio link is released » et l appel perdu.
+     *
+     * C EST LA MEME ERREUR QUE DEUX AUTRES CORRIGEES CE JOUR : deduire un
+     * evenement de cycle de vie (« le canal est fini ») d un symptome local
+     * (« je n ai rien decode depuis 2 s »). Sur un banc ou le decodage est
+     * imparfait, les deux sont confondus en permanence, et la garde se
+     * retourne contre le canal qu elle protege.
+     *
+     * Le MONTANT, lui, ne depend pas de nous : d_task_u dedie (12 = DUL,
+     * 13/14 = TCH) signifie que le mobile EMET sur son canal dedie, donc que
+     * ce canal existe. C est une preuve, pas une inference. */
+    /* ⚠️ ENTRETENIR, PAS ARMER — et la nuance a coute un run.
+     * [2026-08-31] La premiere version ARMAIT la garde ici. Mesure : task_u
+     * vaut 12/13/14 bien au-dela du canal dedie (621 / 1954 / 81 sur le run),
+     * la garde s est donc armee a 6 % du journal et n a JAMAIS ete levee --
+     * « CAMP: a_cd<-SI » = 0 sur les 94 % restants, et le mobile a sorti 27
+     * lignes de selection de cellule. C est trait pour trait la famine de SI
+     * decrite dans le commentaire du 2026-08-12, que ce meme TTL existait pour
+     * eviter. On la reintroduisait en croyant la contourner.
+     *
+     * L armement reste donc au DESCENDANT (set_dcch_active), seul signal lie a
+     * un bloc dedie REEL. Le montant ne fait que repousser la peremption d une
+     * garde DEJA armee : il couvre les trous de decodage pendant le canal, sans
+     * pouvoir prolonger la garde au-dela de sa fin. */
+    if (g_shunt.dcch_guard_armed &&
+        (g_shunt.d_task_u == DUL_DSP_TASK || g_shunt.d_task_u == TCHT_DSP_TASK ||
+         g_shunt.d_task_u == TCHA_DSP_TASK)) {
+        g_shunt.dcch_guard_tick = g_shunt.tick_cnt;
+    }
+
     if (g_shunt.d_task_u != 0 && shunt_capture_tch_ul(g_shunt.d_task_u)) {
         /* traite par le chemin TCH ; ne pas retomber sur la fenetre SDCCH */
     } else if (g_shunt.d_task_u != 0) {
@@ -1023,8 +1072,11 @@ void calypso_dsp_shunt_set_dcch_active(int on)
                                                         * (121 paires mesurees en un run). */
             SHUNT_LOG("DCCH-GARDE : ARMEE -- SI du camp supprime dans a_cd\n");
     } else {
-        if (g_shunt.dcch_guard_armed)
-            SHUNT_LOG("DCCH-GARDE : levee -- SI du camp retabli\n");
+        if (g_shunt.dcch_guard_armed) {
+            calypso_l1ctl_dcch_forget();       /* meme raison que sur la peremption */
+            SHUNT_LOG("DCCH-GARDE : levee -- SI du camp retabli"
+                      " (identite de canal oubliee)\n");
+        }
         g_shunt.dcch_guard_armed = false;
     }
 }
@@ -1059,8 +1111,19 @@ static bool shunt_tch_fresh(bool valid, uint32_t tick);
 static bool shunt_dcch_si_guard(void)
 {
     static int ttl = -1;
+    /* [2026-08-31] 430 (~2 s) -> 6450 (~30 s). Ce TTL reste NECESSAIRE : le
+     * DM_REL_REQ n arrive pas quand l etablissement echoue avant le mode dedie,
+     * et sans filet la garde resterait armee pour toujours -- defaut
+     * no-cell-info deja paye une fois (cf. le commentaire de 2026-08-12).
+     * Mais 2 s en faisait un PROXY DE QUALITE DE DECODAGE, pas un filet : il
+     * expirait entre deux blocs dedies sur un canal bien vivant. Il est
+     * desormais rafraichi par le montant dedie (voir le site de capture UL),
+     * qui ne depend pas de notre decodage. Le TTL RESTE COURT : c est lui qui
+     * rend le camp au mobile des la fin du canal, et l allonger l affame --
+     * essaye a 30 s le 31/08, 27 lignes de selection de cellule. Le montant
+     * couvre les trous PENDANT le canal ; le TTL tranche APRES. */
     if (ttl < 0) { const char *e = getenv("CALYPSO_DCCH_SI_GUARD");
-                   ttl = (e && *e) ? atoi(e) : 430; }     /* ~2 s sans bloc dedie = canal termine */
+                   ttl = (e && *e) ? atoi(e) : 430; }     /* ~2 s sans aucun signe = canal fini */
     if (ttl == 0 || !g_shunt.dcch_guard_armed) return false;
 
     /* [2026-08-09 REVISION] NE PAS SUPPRIMER SANS REMPLACANT.
@@ -1118,7 +1181,9 @@ static bool shunt_dcch_si_guard(void)
      * site de presentation. */
     if ((uint32_t)(g_shunt.tick_cnt - g_shunt.dcch_guard_tick) > (uint32_t)ttl) {
         g_shunt.dcch_guard_armed = false;      /* plus de bloc dedie depuis ttl : canal fini */
-        SHUNT_LOG("DCCH-GARDE : levee (peremption) -- SI du camp retabli\n");
+        calypso_l1ctl_dcch_forget();           /* le prochain canal sera VU, meme chan_nr egal */
+        SHUNT_LOG("DCCH-GARDE : levee (peremption) -- SI du camp retabli"
+                  " (identite de canal oubliee)\n");
         return false;
     }
     return true;
@@ -2064,16 +2129,25 @@ static void shunt_publish_kc(void)
         return;
     tick = 0;
 
-    uint16_t *d = (g_shunt.c54x && g_shunt.c54x->data) ? g_shunt.c54x->data : NULL;
-    if (!d)
-        return;
-
-    uint16_t mode = d[ndb_w(g_ndb.d_a5mode)];
+    /* ── DECOUPLE DE CALYPSO_DSP=c54x ───────────────────────────────────────
+     * [2026-08-31] La premiere version lisait g_shunt.c54x->data[], donc ne
+     * fonctionnait QUE si le vrai c54x etait attache. Le Kc devenait alors
+     * l otage d un reglage qui n a rien a voir avec le chiffrement.
+     *
+     * L API RAM n appartient PAS au DSP : c est calypso_trx qui la cree et la
+     * mappe a 0xFFD00000 (calypso_trx.c:2342, adossee a s->dsp_ram[]). Et les
+     * ecritures ARM y vont TOUJOURS -- avec c54x elles sont miroitees dans les
+     * deux tampons (cf. l en-tete de calypso_trx.h et la l.247 :
+     * `s->dsp ? s->dsp->data[mot] : s->dsp_ram[...]`).
+     *
+     * d_a5mode et a_kc sont ecrits par le FIRMWARE (dsp_load_ciph_param), donc
+     * par le chemin MMIO : les lire via l AddressSpace donne la meme valeur,
+     * avec ou sans c54x. shunt_read_w() existait deja pour ca. */
+    uint16_t mode = shunt_read_w(BASE_API_NDB + g_ndb.d_a5mode);
     uint8_t  kc[8];
-    unsigned base = ndb_w(g_ndb.a_kc);
 
     for (int i = 0; i < 4; i++) {
-        uint16_t w = d[base + (unsigned)i];
+        uint16_t w = shunt_read_w(BASE_API_NDB + g_ndb.a_kc + (uint32_t)i * 2);
         kc[6 - 2 * i] = (uint8_t)(w >> 8);
         kc[7 - 2 * i] = (uint8_t)(w & 0xFF);
     }

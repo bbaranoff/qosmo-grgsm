@@ -28,6 +28,18 @@
 #include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/calypso_kc.h"   /* format + ecrivain unique de /dev/shm/calypso_kc */
 
+/* Derniere identite de canal dedie vue (chan_nr GSM 08.58), ou 0xFF = aucune.
+ * Statique de FICHIER et non de fonction : le shunt doit pouvoir l oublier a la
+ * fin d un canal, sans quoi un second appel sur la meme sous-voie n est jamais
+ * vu comme un canal neuf. */
+static uint8_t last_chan_nr = 0xFF;
+
+void calypso_l1ctl_dcch_forget(void);
+void calypso_l1ctl_dcch_forget(void)
+{
+    last_chan_nr = 0xFF;
+}
+
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <fcntl.h>
@@ -363,7 +375,10 @@ static void sercomm_frame_complete(L1CTLSock *s)
             int kind = -1, ss = 0;
             if ((chan_nr & 0xE0) == 0x20)      { kind = 0; ss = (chan_nr >> 3) & 0x03; }
             else if ((chan_nr & 0xC0) == 0x40) { kind = 1; ss = (chan_nr >> 3) & 0x07; }
-            static uint8_t last_chan_nr = 0xFF;
+            /* [2026-08-31] STATIQUE DE FONCTION -> STATIQUE DE FICHIER, pour
+             * qu on puisse l OUBLIER. Voir calypso_l1ctl_dcch_forget() et le
+             * test `chan_nr != last_chan_nr` plus bas : il confondait « meme
+             * identite de canal » et « meme instance de canal ». */
             /* [2026-08-09] FRONT DE LIBERATION DU DEDIE, dans le sens que QEMU
              * parse REELLEMENT. Premiere tentative : accrocher DM_REL_REQ (0x12)
              * dans le bloc mobile->firmware plus bas. C'est du CODE MORT ici :
@@ -407,6 +422,25 @@ static void sercomm_frame_complete(L1CTLSock *s)
                         || ((chan_nr & 0xF0) == 0x10);     /* TCH/H */
                 calypso_dsp_shunt_set_dcch_tch(tch ? 1 : 0);
             }
+            /* ── IDENTITE N EST PAS INSTANCE ───────────────────────────
+             * Ce test ne declenche que si chan_nr CHANGE. Or le BSC realloue
+             * volontiers la meme sous-voie : un second appel qui retombe sur
+             * SDCCH/8 SS0 presente le MEME chan_nr=0x41 que le premier, et
+             * alors rien ne se passe -- ni nouveau dcch_seq, ni set_dcch(),
+             * ni rearmement de la garde SI. Le shunt reste configure sur
+             * l instance PRECEDENTE : fenetre de presentation a_cd perimee,
+             * garde jamais rearmee.
+             *
+             * On ne peut pas comparer plus finement : chan_nr EST l identite,
+             * il ne porte aucun numero d instance. La sortie est donc
+             * d OUBLIER l identite quand le canal se termine, pour que la
+             * prochaine etablissement redeclenche meme a chan_nr egal. C est
+             * calypso_l1ctl_dcch_forget(), appelee par le shunt quand sa garde
+             * conclut a la fin du canal.
+             *
+             * Meme motif d erreur que trois autres corriges le meme jour :
+             * deduire un EVENEMENT (canal neuf) d une COMPARAISON D ETAT
+             * (chan_nr a change) au lieu de l evenement lui-meme. */
             if (kind >= 0 && chan_nr != last_chan_nr) {
                 static uint32_t dcch_seq;
                 last_chan_nr = chan_nr;
