@@ -213,6 +213,10 @@ mod_qemu_start() {
         local gport="${CALYPSO_HOSTGDB_PORT:-9997}"
         local gin="${RUN_DIR}/gdb.in" gout="${LOG_DIR}/gdb.log"
         rm -f "$gin"; mkfifo "$gin" || { mod_fail "mkfifo $gin"; return $MOD_RC_FAIL; }
+        # L1CTL_SOCK : cf. le prefixe de la branche sans gdbserver, plus bas.
+        # gdbserver transmet SON environnement a l'inferieur, le prefixe porte
+        # donc bien jusqu'a QEMU.
+        L1CTL_SOCK="${QEMU_DUMMY_SOCK:-/tmp/qemu_l1ctl_disabled}" \
         gdbserver --no-startup-with-shell ":$gport" \
             "$QEMU_BIN" -M "$mach" -cpu arm946 \
             "${xflags[@]}" "${dflags[@]}" $gdbflag -serial pty -serial pty \
@@ -247,6 +251,19 @@ mod_qemu_start() {
         mod_say "  commandes -> $gin   |   sorties -> $gout"
         mod_say "  poignee : bsp.dsp (C54xState*) — ex : tools/gdbq.sh \"p bsp.dsp->ar[2]\""
     else
+        # [2026-08-31] L1CTL_SOCK EN PREFIXE - la piece qui manquait.
+        # 05-config.sh « POURQUOI 4 » explique deja la regle : le serveur L1CTL
+        # interne de QEMU (hw/arm/calypso/l1ctl_sock.c) doit etre envoye sur une
+        # poubelle pour qu'il ne squatte pas /tmp/osmocom_l2, le VRAI socket,
+        # cree par osmocon (-s). 05-config POSE bien QEMU_DUMMY_SOCK... mais
+        # aucun lanceur ne l'APPLIQUAIT depuis la reecriture modulaire : QEMU
+        # retombait sur son defaut en dur (l1ctl_sock.c:55), faisait unlink() du
+        # socket d'osmocon (l1ctl_sock.c:669) et ejectait le mobile en place
+        # (l1ctl_sock.c:637, "replacing existing client"). Cote mobile :
+        # "Layer2 socket failed" puis exit(102), sans reconnexion
+        # (l1l2_interface.c:56). En prefixe et NON exportee : elle ne doit
+        # atteindre que ce child, sinon les sondes cherchent la poubelle.
+        L1CTL_SOCK="${QEMU_DUMMY_SOCK:-/tmp/qemu_l1ctl_disabled}" \
         "$QEMU_BIN" -M "$mach" -cpu arm946 \
             "${xflags[@]}" "${dflags[@]}" $gdbflag -serial pty -serial pty \
             -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
