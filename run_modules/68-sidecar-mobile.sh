@@ -62,9 +62,10 @@ mod_sidecar_mobile_start() {
     # 70-l2.sh — tous les modules sont sources avant tout demarrage (run.sh:323),
     # donc la variable est posee quand cette fonction s'execute.
     mod_say "debug    : $CALYPSO_MOBILE_DEBUG"
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
     PULSE_LATENCY_MSEC="$CALYPSO_PULSE_LATENCY_MSEC" \
-        stdbuf -oL -eL "$SC_MOBILE_BIN" -c "$SC_MOBILE_CFG" \
-        -d "$CALYPSO_MOBILE_DEBUG" >>"$log" 2>&1 &
+        setsid stdbuf -oL -eL "$SC_MOBILE_BIN" -c "$SC_MOBILE_CFG" \
+        -d "$CALYPSO_MOBILE_DEBUG" >>"$log" 2>&1 </dev/null &
     radio_save_pid sidecar-mobile $!
     mod_ok
 }

@@ -216,12 +216,13 @@ mod_qemu_start() {
         # L1CTL_SOCK : cf. le prefixe de la branche sans gdbserver, plus bas.
         # gdbserver transmet SON environnement a l'inferieur, le prefixe porte
         # donc bien jusqu'a QEMU.
+        # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
         L1CTL_SOCK="${QEMU_DUMMY_SOCK:-/tmp/qemu_l1ctl_disabled}" \
-        gdbserver --no-startup-with-shell ":$gport" \
+        setsid gdbserver --no-startup-with-shell ":$gport" \
             "$QEMU_BIN" -M "$mach" -cpu arm946 \
             "${xflags[@]}" "${dflags[@]}" $gdbflag -serial pty -serial pty \
             -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
-            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 &
+            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
         local gspid=$!
         printf '%s\n' "$gspid" > "${RUN_DIR}/gdbserver.pid"
         # le vrai pid de QEMU : les barrieres en aval et les controles
@@ -239,9 +240,9 @@ mod_qemu_start() {
             return $MOD_RC_FAIL
         fi
         # un processus garde le tube ouvert en ECRITURE, sinon gdb voit EOF et sort
-        sleep infinity > "$gin" &
+        setsid sleep infinity > "$gin" &
         printf '%s\n' "$!" > "${RUN_DIR}/gdb.holder.pid"
-        gdb -q -nx \
+        setsid gdb -q -nx \
             -ex "set pagination off" -ex "set confirm off" \
             -ex "set sysroot /" \
             -ex "target remote :$gport" \
@@ -263,18 +264,22 @@ mod_qemu_start() {
         # "Layer2 socket failed" puis exit(102), sans reconnexion
         # (l1l2_interface.c:56). En prefixe et NON exportee : elle ne doit
         # atteindre que ce child, sinon les sondes cherchent la poubelle.
+        # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
         L1CTL_SOCK="${QEMU_DUMMY_SOCK:-/tmp/qemu_l1ctl_disabled}" \
-        "$QEMU_BIN" -M "$mach" -cpu arm946 \
+        setsid "$QEMU_BIN" -M "$mach" -cpu arm946 \
             "${xflags[@]}" "${dflags[@]}" $gdbflag -serial pty -serial pty \
             -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
-            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 &
+            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
         qpid=$!
     fi
     printf '%s\n' "$qpid" > "${RUN_DIR}/qemu.pid"
-    [ -n "$asm_out" ] && _qemu_asm_ring "$asm_out" "$asm_mo" "$qpid" &
-    _qemu_save_manifest "$qlog" "${LOG_DIR}/qemu-manifest.log" &
-    _qemu_save_head     "$qlog" "${LOG_DIR}/qemu-tete.log" "${QEMU_LOG_HEAD:-8388608}" &
-    _qemu_log_guard     "$qlog" "$QEMU_LOG_MAX" "$qpid" &
+    # Ces quatre-la sont des FONCTIONS shell : `setsid` ne s'y applique pas.
+    # Elles ignorent donc HUP explicitement, sinon elles mouraient avec le pty
+    # de `docker exec` et le plafond de journal partait avec elles.
+    [ -n "$asm_out" ] && ( trap '' HUP; _qemu_asm_ring "$asm_out" "$asm_mo" "$qpid" ) &
+    ( trap '' HUP; _qemu_save_manifest "$qlog" "${LOG_DIR}/qemu-manifest.log" ) &
+    ( trap '' HUP; _qemu_save_head     "$qlog" "${LOG_DIR}/qemu-tete.log" "${QEMU_LOG_HEAD:-8388608}" ) &
+    ( trap '' HUP; _qemu_log_guard     "$qlog" "$QEMU_LOG_MAX" "$qpid" ) &
     mod_say "manifeste : ${LOG_DIR}/qemu-manifest.log"
     mod_ok
 }

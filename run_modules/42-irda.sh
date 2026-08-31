@@ -64,8 +64,9 @@ mod_irda_start() {
     ln -sf "$CALYPSO_IRDA_PTY" "$IRDA_PTY_LINK"
     : > "$FW_IRDA_LOG" 2>/dev/null || true
 
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
     IRDA_ROLE=primary IRDA_PTY="$IRDA_PTY_LINK" \
-        python3 -u "$IRDA_PEER" \
+        setsid python3 -u "$IRDA_PEER" \
         >>"$FW_IRDA_LOG" 2>>"${LOG_DIR:-/root/calypso/logs}/irda_peer.stderr.log" </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/irda_peer.pid"
     mod_ok

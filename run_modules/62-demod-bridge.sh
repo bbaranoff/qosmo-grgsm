@@ -85,7 +85,7 @@ mod_demod_bridge_start() {
     GSMTAP_PORT="$(_demod_gsmtap_port)" \
     ARFCN="${CALYPSO_CCCH_ARFCN:-514}" \
     BIT_SIGN="${BIT_SIGN:-1}" \
-        "$py" -u "$CALYPSO_DEMOD_BRIDGE" >>"$log" 2>&1 &
+        setsid "$py" -u "$CALYPSO_DEMOD_BRIDGE" >>"$log" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR}/demod-bridge.pid"
     mod_ok
 }

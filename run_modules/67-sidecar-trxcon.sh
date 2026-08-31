@@ -39,8 +39,9 @@ mod_sidecar_trxcon_start() {
     rm -f "$SC_L2_SOCK" 2>/dev/null
     mod_say "trxcon -p $SC_BB_PORT -s $SC_L2_SOCK (avance de trame $SC_TRXCON_FN_ADVANCE)"
     mod_say "journal : $log"
-    stdbuf -oL -eL "$SC_TRXCON_BIN" -i "$TRX_BIND_IP" -b "$TRX_BB_IP" \
-        -p "$SC_BB_PORT" -s "$SC_L2_SOCK" -C 1 -F "$SC_TRXCON_FN_ADVANCE" >>"$log" 2>&1 &
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid stdbuf -oL -eL "$SC_TRXCON_BIN" -i "$TRX_BIND_IP" -b "$TRX_BB_IP" \
+        -p "$SC_BB_PORT" -s "$SC_L2_SOCK" -C 1 -F "$SC_TRXCON_FN_ADVANCE" >>"$log" 2>&1 </dev/null &
     radio_save_pid sidecar-trxcon $!
     mod_ok
 }

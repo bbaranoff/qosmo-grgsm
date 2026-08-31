@@ -109,7 +109,8 @@ mod_ipc_device_start() {
     mod_say "TOA montant : SDCCH_SMP_OFS=${CALYPSO_UL_SDCCH_SMP_OFS:-<defaut 0>} TCH_SMP_OFS=${CALYPSO_UL_TCH_SMP_OFS:-<defaut 0>}"
     mod_say "socket maître attendu : $IPC_MSOCK_PATH"
 
-    stdbuf -oL -eL "$CALYPSO_IPC_DEVICE" -u "$IPC_SOCK_DIR" -n 0 >>"$IPC_DEVICE_LOG" 2>&1 &
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid stdbuf -oL -eL "$CALYPSO_IPC_DEVICE" -u "$IPC_SOCK_DIR" -n 0 >>"$IPC_DEVICE_LOG" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/ipc-device.pid"
     mod_ok
 }

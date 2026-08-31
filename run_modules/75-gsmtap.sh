@@ -72,8 +72,9 @@ mod_gsmtap_start() {
     # tcpdump n'a pas besoin d'un producteur pour ouvrir sa capture, et rater les
     # cinq premières secondes de trafic est un défaut, pas une précaution. On
     # lance tout de suite ; la barrière porte sur le fichier réellement créé.
-    tcpdump -i "$CALYPSO_GSMTAP_IFACE" -U \
-            -w "$pcap" "udp port $CALYPSO_GSMTAP_PORT_CAPTURE" >>"$log" 2>&1 &
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid tcpdump -i "$CALYPSO_GSMTAP_IFACE" -U \
+            -w "$pcap" "udp port $CALYPSO_GSMTAP_PORT_CAPTURE" >>"$log" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR}/gsmtap.pid"
     mod_ok
 }

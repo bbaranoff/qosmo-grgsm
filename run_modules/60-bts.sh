@@ -89,7 +89,8 @@ mod_bts_status() {
 mod_bts_start() {
     mkdir -p "${RUN_DIR:-/tmp/calypso}" "$(dirname "$BTS_LOG")" 2>/dev/null || true
     : > "$BTS_LOG" 2>/dev/null || true
-    stdbuf -oL -eL "$OSMO_BTS_TRX" -c "$BTS_CFG" >>"$BTS_LOG" 2>&1 &
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid stdbuf -oL -eL "$OSMO_BTS_TRX" -c "$BTS_CFG" >>"$BTS_LOG" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/bts.pid"
     mod_ok
 }

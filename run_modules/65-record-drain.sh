@@ -82,7 +82,7 @@ mod_record_drain_start() {
     CALYPSO_RECORD_FIFO="$CALYPSO_RECORD_FIFO" \
     CALYPSO_RECORD_FILE="$CALYPSO_RECORD_FILE" \
     CALYPSO_RECORD_RING="$CALYPSO_RECORD_RING" \
-        python3 -u "$CALYPSO_RECORD_DRAIN" >>"$log" 2>&1 &
+        setsid python3 -u "$CALYPSO_RECORD_DRAIN" >>"$log" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR}/record-drain.pid"
     mod_ok
 }

@@ -196,11 +196,12 @@ mod_l2_start() {
             # PULSE_LATENCY_MSEC : cf. le bloc « DESCENDANT MUET » en tête de
             # module. Sans elle, le descendant est muet une fois sur deux.
             mod_say "latence  : PULSE_LATENCY_MSEC=${CALYPSO_PULSE_LATENCY_MSEC:-<defaut greffon>}"
+            # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
             PULSE_LATENCY_MSEC="$CALYPSO_PULSE_LATENCY_MSEC" \
-                mobile -c "$cfg" -d "$CALYPSO_MOBILE_DEBUG" >>"$log" 2>&1 & ;;
-        ccch_scan)  ccch_scan -a "$arfcn" >>"$log" 2>&1 & ;;
-        bcch_scan)  bcch_scan -a "$arfcn" >>"$log" 2>&1 & ;;
-        cell_log)   cell_log            >>"$log" 2>&1 & ;;
+                setsid mobile -c "$cfg" -d "$CALYPSO_MOBILE_DEBUG" >>"$log" 2>&1 </dev/null & ;;
+        ccch_scan)  setsid ccch_scan -a "$arfcn" >>"$log" 2>&1 </dev/null & ;;
+        bcch_scan)  setsid bcch_scan -a "$arfcn" >>"$log" 2>&1 </dev/null & ;;
+        cell_log)   setsid cell_log            >>"$log" 2>&1 </dev/null & ;;
     esac
     printf '%s\n' "$!" > "${RUN_DIR}/l2.pid"
     mod_ok

@@ -68,7 +68,7 @@ mod_bridge_py_start() {
     BRIDGE_BSP_IQ="$BRIDGE_BSP_IQ" \
     CALYPSO_DOPPLER_HZ="${CALYPSO_DOPPLER_HZ:-0}" \
     CALYPSO_BURST_PRINT="${CALYPSO_BURST_PRINT:-0}" \
-        "$_BRIDGE_PYTHON" -u "$BRIDGE_PY" >>"$BRIDGE_LOG" 2>&1 &
+        setsid "$_BRIDGE_PYTHON" -u "$BRIDGE_PY" >>"$BRIDGE_LOG" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/bridge-py.pid"
     mod_ok
 }

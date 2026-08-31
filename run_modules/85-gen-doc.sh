@@ -96,7 +96,10 @@ mod_gen_doc_start() {
     mod_say "pytest   : $py $verb (scope=$CALYPSO_PYTEST_SCOPE)"
     mod_say "tests    : $CALYPSO_TESTS_DIR — artefacts dans $CALYPSO_TEST_OUT"
 
+    # trap '' HUP : sous-shell, donc pas de `setsid` possible - meme raison
+    # que les garde-fous de 40-qemu.sh (voir _lib/radio.sh, bloc SIGHUP).
     (
+        trap '' HUP
         cd "$CALYPSO_TESTS_DIR" || exit 1
         CALYPSO_TEST_OUT="$CALYPSO_TEST_OUT" \
         CALYPSO_REPO="${QEMU_TREE:-${QEMU_TREE}}" \

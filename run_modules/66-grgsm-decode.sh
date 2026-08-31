@@ -139,9 +139,9 @@ mod_grgsm_decode_start() {
     mod_say "sortie   : SI -> GSMTAP ${CALYPSO_SHUNT_GSMTAP_PORT:-4730} (feed_si) + SCH/BSIC -> 4731 (feed_sb)"
 
     if [ "$CALYPSO_GRGSM_DECODER" = si-bridge ]; then
-        bash "$sc" >>"$log" 2>&1 &
+        setsid bash "$sc" >>"$log" 2>&1 </dev/null &
     else
-        python3 -u "$sc" >>"$log" 2>&1 &
+        setsid python3 -u "$sc" >>"$log" 2>&1 </dev/null &
     fi
     printf '%s\n' "$!" > "${RUN_DIR}/grgsm-decode.pid"
     mod_ok

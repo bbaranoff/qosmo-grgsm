@@ -80,13 +80,14 @@ mod_osmocon_start() {
     mod_say "firmware : $FIRMWARE_BIN"
     mod_say "modèle   : $OSMOCON_MODEL (romload = ROM émulée ; c123xor = vrai téléphone)"
     mod_say "L1CTL    : $L1CTL_SOCK_PATH"
-    stdbuf -oL -eL "$OSMOCON" \
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid stdbuf -oL -eL "$OSMOCON" \
         -m "$OSMOCON_MODEL" \
         -i "$OSMOCON_INTER_BYTE_DELAY" \
         -p "$OSMOCON_PTY" \
         -s "$L1CTL_SOCK_PATH" \
         "$FIRMWARE_BIN" \
-        -d "$OSMOCON_DEBUG" >>"$log" 2>&1 &
+        -d "$OSMOCON_DEBUG" >>"$log" 2>&1 </dev/null &
     printf '%s\n' "$!" > "${RUN_DIR:-/tmp/calypso}/osmocon.pid"
     mod_ok
 }

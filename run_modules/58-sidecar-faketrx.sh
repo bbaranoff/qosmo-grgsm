@@ -50,9 +50,10 @@ mod_sidecar_faketrx_start() {
     local log; log="$(radio_log sidecar-faketrx)"
     mod_say "fake_trx -P $SC_TRX_PORT (BTS#1) -p $SC_BB_PORT (bande de base)"
     mod_say "journal  : $log"
-    stdbuf -oL -eL "$FAKETRX_PYTHON" "$FAKETRX_PY" \
+    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
+    setsid stdbuf -oL -eL "$FAKETRX_PYTHON" "$FAKETRX_PY" \
         -b "$TRX_BIND_IP" -R "$TRX_BTS_IP" -r "$TRX_BB_IP" \
-        -P "$SC_TRX_PORT" -p "$SC_BB_PORT" >>"$log" 2>&1 &
+        -P "$SC_TRX_PORT" -p "$SC_BB_PORT" >>"$log" 2>&1 </dev/null &
     radio_save_pid sidecar-faketrx $!
     mod_ok
 }
