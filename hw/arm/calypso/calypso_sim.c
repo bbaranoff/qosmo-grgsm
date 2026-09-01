@@ -1,24 +1,4 @@
-/*
- * calypso_sim.c — ISO 7816 / GSM 11.11 SIM emulator for the Calypso
- *
- * Replaces the historical 1-line ATR-pulse stub. Implements:
- *   - ATR delivery on CMDSTART
- *   - APDU framing through the TX/RX FIFO
- *   - Minimum viable GSM 11.11 file system (MF, DF_GSM, DF_TELECOM)
- *   - Standard commands: SELECT (A4), READ_BINARY (B0), READ_RECORD (B2),
- *                         GET_RESPONSE (C0), STATUS (F2), VERIFY_CHV (20),
- *                         RUN_GSM_ALGORITHM (88)
- *
- * Test SIM identity (matches the standard test PLMN 001/01):
- *   IMSI = 001 01 0000000001  (15 digits)
- *   ICCID = 8901010000000000001 F  (BCD swapped)
- *   Ki = 00..00 (16 bytes — auth always returns deterministic SRES/Kc)
- *
- * Bytes flow: firmware writes APDU bytes one at a time to DTX. We parse
- * the 5-byte ISO 7816 header, optionally collect data bytes (P3 of length
- * for outgoing case 3) and dispatch. Response bytes are pushed to RX FIFO,
- * IT_RX raised, IRQ pulsed.
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
@@ -31,24 +11,15 @@
 
 #define APDU_MAX_LEN     261
 #define RX_FIFO_SIZE     512
-#define ATR_DELAY_NS     1000000  /* 1 ms simulated */
+#define ATR_DELAY_NS     1000000
 
-/* Minimal valid ATR (4 bytes):
- *   TS = 0x3B  (direct convention)
- *   T0 = 0x02  (Y1=0 → no TA/TB/TC/TD interface bytes,
- *               K =2 → 2 historical bytes follow)
- *   Hist[0..1] = 0x14 0x50  (arbitrary, identifies a test card)
- * No TCK byte because no T!=0 protocol indicated.
- * Total bytes the firmware will read = 4. */
 static const uint8_t SIM_ATR[] = { 0x3B, 0x02, 0x14, 0x50 };
-
-/* ---------- file system ---------------------------------------------- */
 
 typedef enum {
     EF_TRANSPARENT = 0,
     EF_LINEAR_FIXED = 1,
     EF_CYCLIC = 2,
-    EF_DF = 0xF0,    /* not a real EF — directory entry */
+    EF_DF = 0xF0,
     EF_MF = 0xF1,
 } EfStructure;
 
@@ -56,50 +27,46 @@ typedef struct SimFile {
     uint16_t fid;
     uint16_t parent;
     uint8_t  structure;
-    uint16_t size;        /* total bytes (transparent) or rec_len * nrec */
-    uint8_t  rec_len;     /* records (linear/cyclic) */
-    uint8_t  data[64];    /* in-line storage (small EFs only) */
+    uint16_t size;
+    uint8_t  rec_len;
+    uint8_t  data[64];
 } SimFile;
 
-/* SIM identity defaults (overridden at boot from the osmocom-bb mobile
- * config — see load_config_from_file). EF_IMSI is GSM 11.11 BCD-packed
- * with the standard length-byte + parity-nibble layout. */
-
 static SimFile sim_files[] = {
-    { 0x3F00, 0x0000, EF_MF, 0, 0, {0} },          /* MF root */
-    { 0x7F20, 0x3F00, EF_DF, 0, 0, {0} },          /* DF_GSM */
-    { 0x7F10, 0x3F00, EF_DF, 0, 0, {0} },          /* DF_TELECOM */
-    { 0x2FE2, 0x3F00, EF_TRANSPARENT, 10, 0,       /* EF_ICCID */
+    { 0x3F00, 0x0000, EF_MF, 0, 0, {0} },
+    { 0x7F20, 0x3F00, EF_DF, 0, 0, {0} },
+    { 0x7F10, 0x3F00, EF_DF, 0, 0, {0} },
+    { 0x2FE2, 0x3F00, EF_TRANSPARENT, 10, 0,
       { 0x98, 0x10, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF1 } },
-    { 0x6F07, 0x7F20, EF_TRANSPARENT, 9, 0,        /* EF_IMSI */
+    { 0x6F07, 0x7F20, EF_TRANSPARENT, 9, 0,
       { 0x08, 0x09, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0xF1 } },
-    { 0x6F30, 0x7F20, EF_TRANSPARENT, 24, 0,       /* EF_PLMNsel: 001 01 = FFFFFF empty list */
-      { 0x00, 0xF1, 0x10,  /* PLMN 001 01 */
+    { 0x6F30, 0x7F20, EF_TRANSPARENT, 24, 0,
+      { 0x00, 0xF1, 0x10,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
-    { 0x6F38, 0x7F20, EF_TRANSPARENT, 14, 0,       /* EF_SST: services */
+    { 0x6F38, 0x7F20, EF_TRANSPARENT, 14, 0,
       { 0xFF, 0x33, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
-    { 0x6F78, 0x7F20, EF_TRANSPARENT, 2, 0,        /* EF_ACC: access class */
+    { 0x6F78, 0x7F20, EF_TRANSPARENT, 2, 0,
       { 0x00, 0x01 } },
-    { 0x6FAD, 0x7F20, EF_TRANSPARENT, 4, 0,        /* EF_AD: admin data */
+    { 0x6FAD, 0x7F20, EF_TRANSPARENT, 4, 0,
       { 0x00, 0x00, 0x00, 0x02 } },
-    { 0x6F7E, 0x7F20, EF_TRANSPARENT, 11, 0,       /* EF_LOCI: location info */
-      { 0xFF, 0xFF, 0xFF, 0xFF,           /* TMSI */
-        0xFF, 0xFF, 0xFF,                 /* LAI = unknown */
-        0x00, 0x00,                       /* TMSI time */
-        0xFF, 0x00 } },                   /* update status: not updated */
-    { 0x6F74, 0x7F20, EF_TRANSPARENT, 16, 0,       /* EF_BCCH */
+    { 0x6F7E, 0x7F20, EF_TRANSPARENT, 11, 0,
+      { 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF,
+        0x00, 0x00,
+        0xFF, 0x00 } },
+    { 0x6F74, 0x7F20, EF_TRANSPARENT, 16, 0,
       { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
-    { 0x6F46, 0x7F20, EF_TRANSPARENT, 17, 0,       /* EF_SPN */
+    { 0x6F46, 0x7F20, EF_TRANSPARENT, 17, 0,
       { 0x01, 'Q','E','M','U','-','S','I','M', ' ',' ',' ',' ',' ',' ',' ',' ' } },
 };
 #define SIM_FILE_COUNT (sizeof(sim_files) / sizeof(sim_files[0]))
 
 static SimFile *find_file(uint16_t fid, uint16_t parent_pref)
 {
-    /* Try parent-scoped first (for relative selects), then global. */
+
     if (parent_pref) {
         for (size_t i = 0; i < SIM_FILE_COUNT; i++)
             if (sim_files[i].fid == fid && sim_files[i].parent == parent_pref)
@@ -111,15 +78,6 @@ static SimFile *find_file(uint16_t fid, uint16_t parent_pref)
     return NULL;
 }
 
-/* ---------- IMSI BCD encoding --------------------------------------- */
-
-/* Encode a numeric IMSI string (e.g. "001010000000001") into the GSM 11.11
- * EF_IMSI 9-byte layout:
- *   byte 0:   length of the actual data following (1..8)
- *   byte 1:   high nibble = first IMSI digit, low nibble = parity
- *             (parity = 9 if odd # digits, 1 if even)
- *   bytes 2..N: pairs of digits, low digit in low nibble
- *               (last byte may have F filler in high nibble) */
 static int encode_imsi_bcd(const char *imsi_str, uint8_t out[9])
 {
     int n = 0;
@@ -140,46 +98,33 @@ static int encode_imsi_bcd(const char *imsi_str, uint8_t out[9])
     return data_len + 1;
 }
 
-/* ---------- card state ----------------------------------------------- */
-
 struct CalypsoSim {
     qemu_irq    irq;
     QEMUTimer  *atr_timer;
-    QEMUTimer  *wt_timer;       /* fires IT_WT after RX FIFO drains
-                                 * — tells firmware "no more bytes coming" */
-    /* (Removed 2026-05-27) clear_edge_timer / pending_edge_clear
-     * supprimés. Justification ground-truth dans le case CALYPSO_SIM_REG_IT
-     * du read handler (read-to-clear immédiat, pas W1C). */
-    uint8_t     ki[16];         /* COMP128 secret key from mobile.cfg */
+    QEMUTimer  *wt_timer;
+
+    uint8_t     ki[16];
     bool        ki_valid;
 
-    /* register shadows */
     uint16_t    cmd, stat, conf1, conf2, maskit, it_cd;
 
-    /* IT register — bits set as events occur, cleared on read */
     uint16_t    it;
 
-    /* TX FIFO (firmware → SIM) — APDU assembly */
     uint8_t     apdu[APDU_MAX_LEN];
-    int         apdu_pos;       /* bytes received so far */
-    int         apdu_expected;  /* total expected length */
+    int         apdu_pos;
+    int         apdu_expected;
 
-    /* RX FIFO (SIM → firmware) */
     uint8_t     rx[RX_FIFO_SIZE];
     int         rx_head, rx_tail;
 
-    /* selected file context */
-    uint16_t    selected_df;   /* current directory (MF or DF_GSM/TELECOM) */
-    uint16_t    selected_ef;   /* last selected EF (for SELECT response) */
+    uint16_t    selected_df;
+    uint16_t    selected_ef;
 
-    /* GET RESPONSE pending data */
     uint8_t     resp_buf[64];
     int         resp_len;
 
     bool        powered;
 };
-
-/* ---------- RX FIFO --------------------------------------------------- */
 
 G_GNUC_UNUSED
 static int rx_count(CalypsoSim *s)
@@ -214,28 +159,18 @@ static void rx_push_n(CalypsoSim *s, const uint8_t *buf, int n)
     for (int i = 0; i < n; i++) rx_push(s, buf[i]);
 }
 
-/* Forward decl */
 static void update_irq(CalypsoSim *s);
 
-/* IT_WT semantics: fires when no new char arrives within the configured
- * "wait time" after the last byte. The osmocom-bb sim_irq_handler uses
- * IT_WT to flag rxDoneFlag when calypso_sim_receive was invoked with
- * expected_length=0 (open-ended ATR receive). We schedule WT a few
- * milliseconds after the FIFO drains. */
-#define WT_DELAY_NS  2000000  /* 2 ms simulated */
+#define WT_DELAY_NS  2000000
 
 static void fire_wt(void *opaque)
 {
     CalypsoSim *s = opaque;
-    if (rx_count(s) > 0) return;        /* new bytes arrived — cancel WT */
+    if (rx_count(s) > 0) return;
     s->it |= CALYPSO_SIM_IT_WT;
     SIM_LOG("WT timeout fired (RX FIFO empty)");
     update_irq(s);
 
-    /* rxDoneFlag side-effect : géré dans calypso_sim_reg_read SIM_IT
-     * case (fires sur chaque IT_WT observé par le firmware, couvre toutes
-     * les SIM ops ATR/SELECT/READ_BINARY/etc). Voir doc complète là-bas.
-     * Le calypso_trx kick 200 Hz complète pour invalidation cache TB. */
 }
 
 static void schedule_wt(CalypsoSim *s)
@@ -245,20 +180,12 @@ static void schedule_wt(CalypsoSim *s)
                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WT_DELAY_NS);
 }
 
-/* IT_RX semantics per Calypso TRM: the bit is set whenever there is
- * a byte waiting to be read in the RX FIFO (DRX). It auto-clears on
- * read access to DRX (when the FIFO empties). We mirror that by
- * recomputing IT_RX from the FIFO occupancy at every IT/DRX touch. */
 static void refresh_it_rx(CalypsoSim *s)
 {
     if (rx_count(s) > 0) s->it |= CALYPSO_SIM_IT_RX;
     else                 s->it &= ~CALYPSO_SIM_IT_RX;
 }
 
-/* Update the IRQ line from the current IT register state. The Calypso
- * INTH is level-sensitive — a pulse can be missed when the ARM has
- * IRQs masked (CPSR I=1) at the moment of the rise/fall. We hold the
- * line high while any unmasked IT bit is set. */
 static void update_irq(CalypsoSim *s)
 {
     if (!s->irq) return;
@@ -282,10 +209,6 @@ static void raise_rx_irq(CalypsoSim *s)
     update_irq(s);
 }
 
-/* (Removed 2026-05-27) clear_edge_cb supprimé — voir SIM_IT read handler. */
-
-/* ---------- ATR delivery --------------------------------------------- */
-
 static void deliver_atr(void *opaque)
 {
     CalypsoSim *s = opaque;
@@ -302,52 +225,47 @@ static void schedule_atr(CalypsoSim *s)
                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ATR_DELAY_NS);
 }
 
-/* ---------- SELECT response (FCP / response template) --------------- */
-
 static int build_select_response(CalypsoSim *s, SimFile *f, uint8_t *out)
 {
-    /* GSM 11.11 SELECT response (status info data). 22 bytes for EF, 22 bytes
-     * for DF/MF. We build a simple but firmware-friendly template. */
+
     int p = 0;
-    out[p++] = 0x00; out[p++] = 0x00;            /* RFU */
-    out[p++] = (f->size >> 8) & 0xFF;            /* file size MSB */
-    out[p++] =  f->size       & 0xFF;            /* file size LSB */
-    out[p++] = (f->fid >> 8) & 0xFF;             /* file ID MSB */
-    out[p++] =  f->fid       & 0xFF;             /* file ID LSB */
+    out[p++] = 0x00; out[p++] = 0x00;
+    out[p++] = (f->size >> 8) & 0xFF;
+    out[p++] =  f->size       & 0xFF;
+    out[p++] = (f->fid >> 8) & 0xFF;
+    out[p++] =  f->fid       & 0xFF;
     if (f->structure == EF_DF || f->structure == EF_MF) {
-        out[p++] = (f->structure == EF_MF) ? 0x01 : 0x02;  /* file type */
-        out[p++] = 0x00;                          /* RFU */
+        out[p++] = (f->structure == EF_MF) ? 0x01 : 0x02;
+        out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00;
-        out[p++] = 0x09;                          /* GSM data length */
-        out[p++] = 0x91;                          /* file characteristics */
-        out[p++] = 0x00;                          /* num child DFs */
-        out[p++] = 0x00;                          /* num child EFs */
-        out[p++] = 0x04;                          /* CHVs */
+        out[p++] = 0x09;
+        out[p++] = 0x91;
         out[p++] = 0x00;
-        out[p++] = 0x83;                          /* CHV1 status */
-        out[p++] = 0x83;                          /* unblock */
-        out[p++] = 0x83;                          /* CHV2 */
+        out[p++] = 0x00;
+        out[p++] = 0x04;
+        out[p++] = 0x00;
+        out[p++] = 0x83;
+        out[p++] = 0x83;
+        out[p++] = 0x83;
         out[p++] = 0x83;
     } else {
-        out[p++] = 0x04;                          /* file type EF */
+        out[p++] = 0x04;
         out[p++] = 0x00;
         out[p++] = 0x00; out[p++] = 0x00;
         out[p++] = 0x00;
-        out[p++] = 0xAA;                          /* access conditions */
+        out[p++] = 0xAA;
         out[p++] = 0x00; out[p++] = 0x00;
-        out[p++] = 0x00;                          /* file status */
-        out[p++] = 0x02;                          /* length of remaining */
+        out[p++] = 0x00;
+        out[p++] = 0x02;
         out[p++] = (f->structure == EF_TRANSPARENT) ? 0x00
                 : (f->structure == EF_LINEAR_FIXED) ? 0x01 : 0x03;
-        out[p++] = f->rec_len;                    /* record length */
+        out[p++] = f->rec_len;
     }
     return p;
 }
-
-/* ---------- APDU dispatch ------------------------------------------- */
 
 static void respond_sw(CalypsoSim *s, uint8_t sw1, uint8_t sw2)
 {
@@ -355,16 +273,13 @@ static void respond_sw(CalypsoSim *s, uint8_t sw1, uint8_t sw2)
     rx_push(s, sw2);
 }
 
-/* For T=0, GSM 11.11 has special procedure: when response data exists,
- * card sends:  SW1=0x9F (or 0x6C/0x61) + SW2=length
- * Then firmware does GET_RESPONSE to read the actual data. */
 static void respond_with_data_pending(CalypsoSim *s,
                                        const uint8_t *data, int len)
 {
     if (len > (int)sizeof(s->resp_buf)) len = sizeof(s->resp_buf);
     memcpy(s->resp_buf, data, len);
     s->resp_len = len;
-    /* 9F xx = "data available, do GET_RESPONSE for xx bytes" */
+
     respond_sw(s, 0x9F, (uint8_t)len);
 }
 
@@ -374,8 +289,6 @@ static void cmd_select(CalypsoSim *s, uint8_t p1, uint8_t p2,
     if (lc != 2) { respond_sw(s, 0x67, 0x00); return; }
     uint16_t fid = (data[0] << 8) | data[1];
 
-    /* Pick parent context: 3F00 reset, 7Fxx changes DF, 2Fxx EF under MF,
-     * 6Fxx EF under current DF. */
     SimFile *f = NULL;
     if (fid == 0x3F00) {
         f = find_file(0x3F00, 0);
@@ -451,8 +364,7 @@ static void cmd_status(CalypsoSim *s, uint8_t le)
 static void cmd_verify_chv(CalypsoSim *s, uint8_t p2, uint8_t lc,
                            const uint8_t *data)
 {
-    /* Test SIM accepts any PIN. Real card would compare and decrement
-     * remaining attempts on mismatch. */
+
     (void)p2; (void)lc; (void)data;
     SIM_LOG("VERIFY_CHV → always OK");
     respond_sw(s, 0x90, 0x00);
@@ -460,9 +372,9 @@ static void cmd_verify_chv(CalypsoSim *s, uint8_t p2, uint8_t lc,
 
 static void cmd_run_gsm_algo(CalypsoSim *s, uint8_t lc, const uint8_t *data)
 {
-    /* RAND in (16 bytes), SRES out (4 bytes) + Kc (8 bytes) = 12 bytes. */
+
     if (lc != 16) { respond_sw(s, 0x67, 0x00); return; }
-    /* Test SIM: deterministic SRES = first 4 bytes of RAND ^ 0xAA, Kc = 0. */
+
     uint8_t resp[12];
     for (int i = 0; i < 4; i++) resp[i]    = data[i] ^ 0xAA;
     for (int i = 0; i < 8; i++) resp[4+i] = 0x00;
@@ -484,7 +396,6 @@ static void dispatch_apdu(CalypsoSim *s)
     SIM_LOG("APDU CLA=%02x INS=%02x P1=%02x P2=%02x P3=%02x dlen=%d",
             cla, ins, p1, p2, p3, dlen > 0 ? dlen : 0);
 
-    /* GSM 11.11 expects CLA=A0; ISO 7816 base allows other classes. */
     switch (ins) {
     case 0xA4: cmd_select(s, p1, p2, p3, data ? data : (const uint8_t *)""); break;
     case 0xB0: cmd_read_binary(s, p1, p2, p3); break;
@@ -501,8 +412,6 @@ static void dispatch_apdu(CalypsoSim *s)
     raise_rx_irq(s);
 }
 
-/* When firmware writes a byte to DTX, accumulate. After 5 header bytes
- * we know the case (incoming/outgoing) and how much more to read. */
 G_GNUC_UNUSED
 static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
 {
@@ -510,9 +419,7 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
         s->apdu[s->apdu_pos++] = b;
     }
     if (s->apdu_pos == 5) {
-        /* For simplicity: if INS is a known WRITE-class command (data sent
-         * by firmware), expect P3 more bytes. Otherwise (READ class),
-         * dispatch immediately. */
+
         uint8_t ins = s->apdu[1];
         bool is_outgoing_data =
             (ins == 0xA4) || (ins == 0xD6) || (ins == 0xDC) ||
@@ -522,8 +429,7 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
         } else {
             s->apdu_expected = 5;
         }
-        /* Procedure byte: T=0 expects card to ACK by echoing INS.
-         * The firmware reads this from DRX before sending the data part. */
+
         if (is_outgoing_data && s->apdu[4] != 0) {
             rx_push(s, ins);
             raise_rx_irq(s);
@@ -536,8 +442,6 @@ static void apdu_tx_byte(CalypsoSim *s, uint8_t b)
     }
 }
 
-/* ---------- public register interface ------------------------------- */
-
 uint16_t calypso_sim_reg_read(CalypsoSim *s, hwaddr off)
 {
     switch (off) {
@@ -545,8 +449,8 @@ uint16_t calypso_sim_reg_read(CalypsoSim *s, hwaddr off)
         return s->cmd;
     case CALYPSO_SIM_REG_STAT: {
         uint16_t v = 0;
-        if (s->powered) v |= CALYPSO_SIM_STAT_NOCARD;   /* card detected */
-        v |= CALYPSO_SIM_STAT_TXPAR;                    /* parity always OK */
+        if (s->powered) v |= CALYPSO_SIM_STAT_NOCARD;
+        v |= CALYPSO_SIM_STAT_TXPAR;
         if (rx_count(s) == 0) v |= CALYPSO_SIM_STAT_FIFOEMPTY;
         if (rx_count(s) >= RX_FIFO_SIZE - 1) v |= CALYPSO_SIM_STAT_FIFOFULL;
         return v;
@@ -556,54 +460,14 @@ uint16_t calypso_sim_reg_read(CalypsoSim *s, hwaddr off)
     case CALYPSO_SIM_REG_IT: {
         refresh_it_rx(s);
         uint16_t v = s->it;
-        /* Edge bits (NATR/WT/OV/TX) are read-clear; level bit RX stays.
-         *
-         * AUDIT FIX 2026-05-08 night (Claude web Q2 hardening) : was
-         *   s->it &= CALYPSO_SIM_IT_RX;
-         * which clears ANY bit set after the snapshot (race with concurrent
-         * fire_wt / IRQ handlers raising new bits). Correct semantic : clear
-         * only edge bits that were observed in `v`, so a bit raised between
-         * snapshot and clear survives. RX bit always preserved (level). */
-        /* Per OsmocomBB firmware spec (calypso/sim.c self-doc) :
-         *   NATR/WT/OV : clear on read of REG_SIM_IT  ← géré ici
-         *   TX         : clear on write to REG_SIM_DTX ← géré dans write handler
-         *   RX         : implicit (level-sensitive via refresh_it_rx)
-         * Ancien code `v & ~CALYPSO_SIM_IT_RX` clearait IT_TX par erreur. */
+
         uint16_t edge_seen = v & (CALYPSO_SIM_IT_NATR |
                                   CALYPSO_SIM_IT_WT   |
                                   CALYPSO_SIM_IT_OV);
-        /* Read-to-clear immédiat (per OsmocomBB firmware spec).
-         *
-         * Hardware Calypso REG_SIM_IT (firmware/calypso/sim.c L245/251/257
-         * self-doc) : NATR/WT/OV cleared **on read access to REG_SIM_IT**.
-         * TX cleared on REG_SIM_DTX write. RX level-sensitive (via FIFO).
-         * sim_irq_handler L391-414 lit SIM_IT 1× et n'écrit JAMAIS d'ack
-         * — il s'appuie 100% sur le read-to-clear. NB : read-to-clear ≠
-         * W1C (W1C = write-1-to-clear, read non-destructif, comportement
-         * HW différent).
-         *
-         * (Removed 2026-05-27) Defer 1µs virtuel précédent escapait une
-         * race cpu_io_recompile TB-truncation INEXISTANTE :
-         *   - cputlb.c L1273-1274 : cpu_io_recompile longjmp via
-         *     cpu_loop_exit_noexc AVANT memory_region_dispatch_read
-         *   - Le handler MMIO fire 1× exactement par LDR (probe UART RBR
-         *     1:1 ratio + probe SIM_IT mem_io_pc identique sur 40 reads
-         *     confirment empiriquement)
-         *   - Défer cassait le RC : sous icount=auto le firmware busy-poll
-         *     SIM_IT, chaque read reschedulait le timer +1µs, clear jamais
-         *     fired, IT_WT stays raised, IRQ stays asserted, ARM en
-         *     service IRQ perpétuel jamais l'opportunité de re-LDR
-         *     rxDoneFlag → deadlock calypso_sim_powerup.
-         *   - Cf. session_20260527 dans memory. */
+
         s->it &= ~edge_seen;
         update_irq(s);
 
-        /* Lighter instrumentation : just IT bits + FIFO state, no PC read.
-         * The ARM_PC access via env.regs[15] from inside an MMIO read may
-         * itself trigger TB recompile under -icount auto. Now we know all
-         * 5 reads come from PC=0x82249c (sim_irq_handler), the PC log
-         * isn't needed and removing it eliminates a potential TB-abort
-         * trigger separate from update_irq. */
         static unsigned itrd;
         if (itrd++ < 40) {
             uintptr_t io_pc = current_cpu ? current_cpu->mem_io_pc : 0;
@@ -618,16 +482,9 @@ uint16_t calypso_sim_reg_read(CalypsoSim *s, hwaddr off)
     case CALYPSO_SIM_REG_DRX: {
         uint8_t b = 0;
         rx_pop(s, &b);
-        update_irq(s);                                  /* maybe clear IT_RX */
-        /* (Moved 2026-05-27, probe-validated) schedule_wt déplacé dans
-         * MASKIT write handler. Avant : armé ici dès FIFO drained → WT
-         * fire pendant delay_ms(100) post-CMDSTART du firmware, AVANT le
-         * `bl calypso_sim_receive`. Handler set rxDoneFlag=1, puis
-         * sim_receive L351 écrase à 0 → poll forever.
-         * Probe [rxDone] confirme chrono : #3 WR val=1 PC=0x8228c4 vt=11ms,
-         * #4 WR val=0 PC=0x8229b4 vt=17ms (5ms après). Inversion fatale.
-         * Maintenant WT armé quand sim_receive unmask IT_WT → fire APRÈS. */
-        return b | (1 << 8);                            /* parity OK */
+        update_irq(s);
+
+        return b | (1 << 8);
     }
     case CALYPSO_SIM_REG_DTX:    return 0;
     case CALYPSO_SIM_REG_MASKIT: return s->maskit;
@@ -644,14 +501,7 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
         if (val & CALYPSO_SIM_CMD_START) {
             s->powered = true;
             SIM_LOG("CMDSTART → ATR delivered (synchronous)");
-            /* AUDIT FIX 2026-05-08 night : was schedule_atr() (1ms VIRTUAL
-             * timer). Under -icount auto, virtual time is rate-limited;
-             * the firmware's SIM driver enters a busy-loop polling
-             * rxDoneFlag (firmware data 0x830510) with IRQs masked
-             * (PSR I=1) before the timer fires, deadlocking the ARM CPU.
-             * Direct delivery: bytes in FIFO at MMIO write return time,
-             * IRQ raised immediately. Same effect as the timer being 0ns.
-             * Equivalent under icount=off (timer fires ~instantly anyway). */
+
             deliver_atr(s);
         }
         if (val & CALYPSO_SIM_CMD_STOP) {
@@ -666,35 +516,23 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
             s->rx_head = s->rx_tail = 0;
             s->selected_df = 0x3F00;
             s->selected_ef = 0x3F00;
-            /* Same audit fix as CMDSTART above. */
+
             if (s->powered) deliver_atr(s);
         }
         break;
     case CALYPSO_SIM_REG_STAT:    s->stat   = val; break;
     case CALYPSO_SIM_REG_CONF1:   s->conf1  = val; break;
     case CALYPSO_SIM_REG_CONF2:   s->conf2  = val; break;
-    case CALYPSO_SIM_REG_IT:      /* W1C ignored */    break;
-    case CALYPSO_SIM_REG_DRX:     /* read-only */      break;
+    case CALYPSO_SIM_REG_IT:           break;
+    case CALYPSO_SIM_REG_DRX:            break;
     case CALYPSO_SIM_REG_DTX:
         apdu_tx_byte(s, (uint8_t)(val & 0xFF));
-        /* Per firmware spec : REG_SIM_IT_SIM_TX clears on write to DTX
-         * (firmware self-doc calypso/sim.c L264). Sans ça, IT_TX restait
-         * latched indéfiniment → TX path bloqué après le 1er byte. */
+
         s->it &= ~CALYPSO_SIM_IT_TX;
         update_irq(s);
         break;
     case CALYPSO_SIM_REG_MASKIT: {
-        /* Arm WT timer quand firmware unmask IT_WT (= sim_receive L358 :
-         * `writew(~(MASK_RX|MASK_WT), MASKIT)`). À ce moment, sim_receive
-         * a déjà fait son rxDoneFlag=0 (L351). Le WT fire APRÈS, handler
-         * set rxDoneFlag=1, poll exit. Ordre garanti dans toutes les
-         * icount modes.
-         *
-         * Condition : WT bit UNMASKED (bit clear) + FIFO empty + IT_WT
-         * not already set. Idempotent : timer_mod_ns ré-arme si déjà armé.
-         * Pas de check sur transition prev_mask→val (MASKIT default BSS=0
-         * dans QEMU = déjà unmasked, transition jamais détectée).
-         * Probe-validated 2026-05-27. */
+
         s->maskit = val;
         update_irq(s);
         bool wt_unmasked = (val & CALYPSO_SIM_IT_WT) == 0;
@@ -709,14 +547,6 @@ void calypso_sim_reg_write(CalypsoSim *s, hwaddr off, uint16_t val)
     }
 }
 
-/* ---------- mobile.cfg parser --------------------------------------- */
-
-/* Parse the osmocom-bb layer23 mobile config:
- *   ms 1
- *     test-sim
- *       imsi 001010000000001
- *       ki comp128 00 11 22 ... 16 hex bytes
- * We pull the imsi (→ EF_IMSI) and ki (→ s->ki for RUN_GSM_ALGORITHM). */
 static void load_config_from_file(CalypsoSim *s, const char *path)
 {
     FILE *fp = fopen(path, "r");
@@ -734,7 +564,7 @@ static void load_config_from_file(CalypsoSim *s, const char *path)
             continue;
         }
         if (!in_test_sim) continue;
-        /* Section ends at a non-indented keyword (e.g. "ms", "exit", "!") */
+
         if (line[0] != ' ' && line[0] != '\t' && line[0] != '\n') {
             in_test_sim = false;
             continue;
@@ -776,14 +606,10 @@ CalypsoSim *calypso_sim_new(qemu_irq sim_irq)
     s->irq = sim_irq;
     s->atr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, deliver_atr, s);
     s->wt_timer  = timer_new_ns(QEMU_CLOCK_VIRTUAL, fire_wt,     s);
-    /* (Removed 2026-05-27) clear_edge_timer — read-to-clear immédiat */
+
     s->selected_df = 0x3F00;
     s->selected_ef = 0x3F00;
 
-    /* Pull IMSI / Ki from the same config the layer23 `mobile` is using.
-     * The launcher (run_new.sh) sets CALYPSO_SIM_CFG to its $MOBILE_CFG,
-     * so the SIM and the mobile stay in sync without us hardcoding any
-     * path. If the env var is missing we keep the file-system defaults. */
     const char *cfg_path = getenv("CALYPSO_SIM_CFG");
     if (cfg_path && *cfg_path) {
         load_config_from_file(s, cfg_path);

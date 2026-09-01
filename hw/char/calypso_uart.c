@@ -1,15 +1,4 @@
-/*
- * calypso_uart.c — Calypso UART
- *
- * Pragmatic emulation for the Compal/Calypso loader path:
- *  - strict 8-bit MMIO accesses
- *  - banked registers via LCR[7] / LCR==0xBF
- *  - SCR / SSR implemented
- *  - RX FIFO with verbose debug
- *  - raw RX/TX dumps to /tmp/qemu-*.raw
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
@@ -18,15 +7,13 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
-#include "hw/core/cpu.h"          /* current_cpu, mem_io_pc — for RBR-READ-PROBE */
+#include "hw/core/cpu.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/arm/calypso/calypso_uart.h"
 #include "hw/arm/calypso/calypso_trx.h"
-#include "hw/arm/calypso/calypso_full_pcb.h"  /* calypso_async_log : tick log off main thread */
-#include "hw/arm/calypso/sercomm_gate.h"
+#include "hw/arm/calypso/calypso_l1ctl_tap.h"
 
-/* Register offsets */
 #define REG_RBR_THR   0x00
 #define REG_IER       0x01
 #define REG_IIR_FCR   0x02
@@ -39,66 +26,33 @@
 #define REG_SCR       0x10
 #define REG_SSR       0x11
 
-/* IER bits */
 #define IER_RX_DATA   (1 << 0)
 #define IER_TX_EMPTY  (1 << 1)
 #define IER_RX_LINE   (1 << 2)
 
-/* IIR values */
 #define IIR_NO_INT    0x01
 #define IIR_RX_LINE   0x06
 #define IIR_RX_DATA   0x04
 #define IIR_TX_EMPTY  0x02
 
-/* LCR bits */
 #define LCR_DLAB      (1 << 7)
 #define LCR_CONF_BF   0xBF
 
-/* LSR bits */
 #define LSR_DR        (1 << 0)
 #define LSR_OE        (1 << 1)
 #define LSR_THRE      (1 << 5)
 #define LSR_TEMT      (1 << 6)
 
-/* MSR bits */
 #define MSR_CTS       (1 << 4)
 #define MSR_DSR       (1 << 5)
 #define MSR_DCD       (1 << 7)
 
-/* FCR bits */
 #define FCR_FIFO_EN   (1 << 0)
 #define FCR_RX_RESET  (1 << 1)
 #define FCR_TX_RESET  (1 << 2)
 
-/* SSR bits (minimal model) */
 #define SSR_TX_FIFO_FULL  (1 << 0)
 
-/**
- * uart_log_raw - Log raw UART data to a file
- * @path: Path to the log file
- * @buf: Buffer containing the data
- * @len: Length of the data
- *
- * Appends binary data to the specified file. Used for debugging
- * modem and IrDA traffic. Silently ignores errors.
- */
-static void uart_log_raw(const char *path, const uint8_t *buf, size_t len)
-{
-    FILE *f = fopen(path, "ab");
-    if (!f) {
-        return;
-    }
-
-    fwrite(buf, 1, len, f);
-    fclose(f);
-}
-
-/* ---- FIFO helpers ---- */
-
-/**
- * fifo_reset - Reset the RX FIFO state
- * @s: UART device state
- */
 static void fifo_reset(CalypsoUARTState *s)
 {
     s->rx_head = 0;
@@ -106,13 +60,6 @@ static void fifo_reset(CalypsoUARTState *s)
     s->rx_count = 0;
 }
 
-/**
- * fifo_push - Push a byte into the RX FIFO
- * @s: UART device state
- * @data: Byte to push
- *
- * Sets overrun error flag if FIFO is full.
- */
 static void fifo_push(CalypsoUARTState *s, uint8_t data)
 {
     if (s->rx_count >= CALYPSO_UART_RX_FIFO_SIZE) {
@@ -131,12 +78,6 @@ static void fifo_push(CalypsoUARTState *s, uint8_t data)
     s->rx_count++;
 }
 
-/**
- * fifo_pop - Pop a byte from the RX FIFO
- * @s: UART device state
- *
- * Returns: The popped byte, or 0 if FIFO is empty.
- */
 static uint8_t fifo_pop(CalypsoUARTState *s)
 {
     uint8_t data = 0;
@@ -149,9 +90,6 @@ static uint8_t fifo_pop(CalypsoUARTState *s)
     s->rx_tail = (s->rx_tail + 1) % CALYPSO_UART_RX_FIFO_SIZE;
     s->rx_count--;
 
-    /* RBR-POP-PROBE (2026-05-27, c web review) : count fifo_pop calls to
-     * discriminate icount-rerun vs access-size-decomposition vs other
-     * byte-loss mechanisms. One romload run shows the ratio. */
     {
         static uint64_t pop_total;
         pop_total++;
@@ -166,8 +104,6 @@ static uint8_t fifo_pop(CalypsoUARTState *s)
 
     return data;
 }
-
-/* ---- IRQ ---- */
 
 static void calypso_uart_update_irq(CalypsoUARTState *s)
 {
@@ -187,9 +123,6 @@ static void calypso_uart_update_irq(CalypsoUARTState *s)
 
     s->iir = iir;
 
-    /* Force edge transition so INTH always sees the change.
-     * After IRQ_CTRL ack clears levels[n], a steady-high line
-     * needs a low→high pulse to re-register in the INTH. */
     qemu_irq_lower(s->irq);
     if (want) {
         qemu_irq_raise(s->irq);
@@ -199,7 +132,7 @@ static void calypso_uart_update_irq(CalypsoUARTState *s)
 void calypso_uart_kick_rx(CalypsoUARTState *s)
 {
     if (s->rx_count > 0 && (s->lsr & LSR_DR)) {
-        /* Force IRQ re-evaluation by pulsing the IRQ line */
+
         qemu_irq_lower(s->irq);
         calypso_uart_update_irq(s);
     }
@@ -212,8 +145,7 @@ void calypso_uart_poll_backend(CalypsoUARTState *s)
 
 void calypso_uart_kick_tx(CalypsoUARTState *s)
 {
-    /* Re-check TX interrupt state — if THR is empty and IER TX enabled,
-     * fire the interrupt so firmware can write next byte. */
+
     calypso_uart_update_irq(s);
 }
 
@@ -231,111 +163,45 @@ void calypso_uart_inject_raw(CalypsoUARTState *s, const uint8_t *buf, int len)
 
 void calypso_uart_force_init(CalypsoUARTState *s)
 {
-    /* Force UART into operational state for firmware that gets stuck
-     * before completing its own UART init (e.g. trx.highram.elf).
-     * Sets MDR1=UART16x, enables RX+TX interrupts. */
+
     if (s->mdr1 != 0x00) {
-        s->mdr1 = 0x00;  /* UART 16x mode */
+        s->mdr1 = 0x00;
         s->scr = 0x01;
     }
-    s->ier = 0x03;  /* RX + TX interrupts enabled */
+    s->ier = 0x03;
     calypso_uart_update_irq(s);
 }
 
-/* ---- RX poll timer ----
- * QEMU's chardev backend (PTY) only delivers data during the main event
- * loop. If the ARM CPU runs in a tight loop without yielding, incoming
- * bytes accumulate in the PTY buffer and never reach calypso_uart_receive.
- * This periodic timer forces QEMU to check for pending chardev input. */
-
-#define UART_RX_POLL_NS  (10 * 1000 * 1000)  /* 10 ms */
+#define UART_RX_POLL_NS  (10 * 1000 * 1000)
 
 static void calypso_uart_rx_poll(void *opaque)
 {
     CalypsoUARTState *s = (CalypsoUARTState *)opaque;
 
-    /* AUDIT FIX 2026-05-08 night : `main_loop_wait(false)` removed.
-     *
-     * In QEMU API, the parameter is named `nonblocking`. `false` means
-     * BLOCKING — the prior comment "non-blocking poll" was wrong.
-     * Worse, calling main_loop_wait from a timer callback creates
-     * arbitrary recursion : the very loop that dispatched this REALTIME
-     * timer is re-entered from within itself.
-     *
-     * Under -icount, this breaks the invariant
-     *   virtual_time = icount * (1 << shift)
-     * because nested TCG bursts update icount non-monotonically relative
-     * to the outer loop's scheduling decisions ; the auto-tune algorithm
-     * drifts and VIRTUAL-clock timers (tdma/firq) miss their deadlines
-     * for seconds at a time. Symptom : bridge UDP path frozen under any
-     * `icount != off`.
-     *
-     * `qemu_chr_fe_accept_input` alone is what's needed : it signals the
-     * chardev backend that more bytes can be delivered. The main loop
-     * resumes naturally at the end of this callback.
-     *
-     * Diagnosed by Claude web event-loop audit 2026-05-08. The user
-     * wants `CALYPSO_ICOUNT != off` to work end-to-end. */
     qemu_chr_fe_accept_input(&s->chr);
 
-    /* Re-arm (realtime, 5ms — tightened from 50ms 2026-05-26 night).
-     *
-     * Sous icount=auto, le main_loop QEMU itère moins fréquemment
-     * pendant les TCG bursts ARM, ce qui creuse une latence wall-clock
-     * entre l'arrivée de bytes osmocon sur la PTY et leur livraison à
-     * calypso_uart_receive. À 50ms la romload upload (64 KiB / blocks
-     * 1024) prenait > 60s wall et osmocon timeout. À 5ms ça matche la
-     * cadence émission osmocon (~1KB tous les 5ms). */
     timer_mod(s->rx_poll_timer,
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 5);
 }
 
-/* ---- Control PTY callbacks ---- */
-
-/* ---- Calypso romloader stub --------------------------------------------
- *
- * On real hardware the Compal/Calypso boots into a small ROM-resident
- * "romloader" that speaks a simple framed protocol over UART:
- *
- *   <i  (0x3c 0x69)                     ident          → ack >i + param >p ...
- *   <w  (0x3c 0x77) hdr(8B) data(N)     write block    → >w (or >W on err)
- *   <c  (0x3c 0x63) chk(1B)             checksum       → >c (or >C)
- *   <b  (0x3c 0x62) addr(4B BE)         branch         → >b → run firmware
- *
- * osmocon performs this handshake before it switches to bridging the
- * mobile↔firmware sercomm channel. Our QEMU loads the firmware via -kernel
- * and never runs the bootloader, so without this stub osmocon loops on
- * "Waiting for handshake".
- *
- * The stub eats every modem-UART RX byte until the branch ack is sent,
- * fakes the protocol responses (no actual download — the firmware is
- * already in RAM), then enables passthrough so subsequent traffic flows
- * to the firmware sercomm parser as usual.
- *
- * The param ack advertises a payload size of 1024 bytes, so each <w
- * block is 8 (header continuation) + 1024 (data) bytes after the 0x77.
- */
-
 typedef enum {
-    ROM_IDLE,        /* waiting for 0x3c lead-in */
-    ROM_AFTER_3C,    /* saw 0x3c, expecting cmd char */
-    ROM_BLOCK_DATA,  /* consuming write block payload */
-    ROM_CHK_DATA,    /* consuming 1-byte checksum */
-    ROM_BR_DATA,     /* consuming 4-byte branch address */
-    ROM_PASSTHROUGH, /* handshake complete — bytes go to sercomm */
+    ROM_IDLE,
+    ROM_AFTER_3C,
+    ROM_BLOCK_DATA,
+    ROM_CHK_DATA,
+    ROM_BR_DATA,
+    ROM_PASSTHROUGH,
 } RomloadState;
 
 static struct {
     RomloadState state;
-    int          needed;        /* bytes still expected for current block */
-    uint16_t     payload_size;  /* what we advertised in param ack */
+    int          needed;
+    uint16_t     payload_size;
 } romload = {
     .state = ROM_IDLE,
     .payload_size = 1024,
 };
 
-/* Returns true when the byte was consumed by the stub (must NOT be
- * forwarded to sercomm). Returns false when passthrough is active. */
 static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 {
     if (romload.state == ROM_PASSTHROUGH) {
@@ -347,15 +213,15 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
         if (b == 0x3c) {
             romload.state = ROM_AFTER_3C;
         }
-        /* discard pre-handshake noise */
+
         return true;
 
     case ROM_AFTER_3C: {
         if (b == 0x69) {
-            /* <i ident → reply >i then >p (param ack with payload size LE) */
+
             uint8_t ack[6] = {
-                0x3e, 0x69,                                   /* >i */
-                0x3e, 0x70,                                   /* >p */
+                0x3e, 0x69,
+                0x3e, 0x70,
                 (uint8_t)((romload.payload_size + 10) & 0xFF),
                 (uint8_t)(((romload.payload_size + 10) >> 8) & 0xFF),
             };
@@ -364,8 +230,7 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
                     "(payload_size=%u)\n", romload.payload_size);
             romload.state = ROM_IDLE;
         } else if (b == 0x77) {
-            /* <w block: 8 hdr-cont (idx, num+1, sz_msb, sz_lsb, addr×4)
-             * + payload_size data bytes still to read */
+
             romload.state  = ROM_BLOCK_DATA;
             romload.needed = 8 + romload.payload_size;
         } else if (b == 0x63) {
@@ -375,7 +240,7 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
             romload.state  = ROM_BR_DATA;
             romload.needed = 4;
         } else {
-            /* unknown command — discard and resync */
+
             romload.state = ROM_IDLE;
         }
         return true;
@@ -383,7 +248,7 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 
     case ROM_BLOCK_DATA:
         if (--romload.needed == 0) {
-            uint8_t ack[2] = { 0x3e, 0x77 };  /* >w */
+            uint8_t ack[2] = { 0x3e, 0x77 };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
             romload.state = ROM_IDLE;
         }
@@ -391,11 +256,8 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 
     case ROM_CHK_DATA:
         if (--romload.needed == 0) {
-            /* osmocon's handle_read_romload sets buf_used_len=3 in
-             * WAITING_CHECKSUM_ACK: it waits for ">c" + a trailing byte
-             * (used for the nack diagnostic). The 2-byte ack alone
-             * keeps it blocked. Echo the checksum byte we just got. */
-            uint8_t ack[3] = { 0x3e, 0x63, b };  /* >c <chk> */
+
+            uint8_t ack[3] = { 0x3e, 0x63, b };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
             fprintf(stderr, "[UART:modem] ROMLOAD STUB: checksum 0x%02x → ack\n",
                     b);
@@ -405,7 +267,7 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 
     case ROM_BR_DATA:
         if (--romload.needed == 0) {
-            uint8_t ack[2] = { 0x3e, 0x62 };  /* >b */
+            uint8_t ack[2] = { 0x3e, 0x62 };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
             fprintf(stderr, "[UART:modem] ROMLOAD STUB: branch → ack — "
                     "switching to sercomm passthrough\n");
@@ -429,37 +291,6 @@ void calypso_uart_receive(void *opaque, const uint8_t *buf, int size)
 {
     CalypsoUARTState *s = (CalypsoUARTState *)opaque;
 
-    /* RX = host → firmware. Modem UART tagged [PTY-MODEM-RX]
-     * (generic — actual DLCI dispatch is logged downstream by the
-     * sercomm parser, e.g. [gate] TRXC RX from PTY for DLCI 4). */
-    {
-        const char *tag = (s->label && !strcmp(s->label, "modem"))
-                          ? "PTY-MODEM-RX" : "UART";
-        const char *lbl = (s->label && !strcmp(s->label, "modem"))
-                          ? "" : s->label ? s->label : "?";
-        fprintf(stderr,
-                "[%s%s%s] <<<RX %d bytes (rx_count=%u free=%u):",
-                tag, *lbl ? ":" : "", lbl,
-                size,
-                (unsigned)s->rx_count,
-                (unsigned)(CALYPSO_UART_RX_FIFO_SIZE - s->rx_count));
-        for (int i = 0; i < size && i < 64; i++)
-            fprintf(stderr, " %02x", buf[i]);
-        if (size > 64) fprintf(stderr, " ...");
-        fprintf(stderr, "\n");
-    }
-
-    if (s->label && !strcmp(s->label, "modem")) {
-        uart_log_raw("/tmp/qemu-modem-rx.raw", buf, size);
-    } else if (s->label && !strcmp(s->label, "irda")) {
-        uart_log_raw("/tmp/qemu-irda-rx.raw", buf, size);
-    }
-
-    /* IrDA UART: raw debug / IrDA-stack channel.  The firmware irphy SIR
-     * de-framer reads these bytes via the RX FIFO (uart_getchar_nb), so push
-     * them straight into the FIFO and raise LSR_DR + the RX IRQ (same as
-     * calypso_uart_inject_raw).  Legacy burst-over-UART routing removed: GSM
-     * DL bursts arrive via UDP/BSP, never this UART. */
     if (s->label && !strcmp(s->label, "irda")) {
         for (int i = 0; i < size; i++)
             fifo_push(s, buf[i]);
@@ -469,11 +300,6 @@ void calypso_uart_receive(void *opaque, const uint8_t *buf, int size)
         return;
     }
 
-    /* Modem UART: filter through the romloader stub first. While the
-     * stub is in handshake mode it eats every byte and replies on the
-     * same chardev to satisfy osmocon. Once branch ack has fired, the
-     * stub goes passthrough and the remaining bytes flow into the
-     * sercomm parser as before. */
     if (s->label && !strcmp(s->label, "modem")) {
         uint8_t passthrough[CALYPSO_UART_RX_FIFO_SIZE];
         int     pt_len = 0;
@@ -483,18 +309,14 @@ void calypso_uart_receive(void *opaque, const uint8_t *buf, int size)
             }
         }
         if (pt_len > 0) {
-            sercomm_gate_feed(s, passthrough, pt_len);
+            calypso_uart_inject_raw(s, passthrough, pt_len);
         }
-        /* Réamorce le chardev backend pour la batch suivante.
-         * Sous icount=auto le main_loop itère moins souvent → sans cet
-         * appel les bytes osmocon attendent jusqu'au prochain tick du
-         * rx_poll_timer (5ms). osmocon timeout sur ses blocs romload. */
+
         qemu_chr_fe_accept_input(&s->chr);
         return;
     }
 
-    /* Non-modem UARTs (irda is already handled above): pass directly. */
-    sercomm_gate_feed(s, buf, size);
+    calypso_uart_inject_raw(s, buf, size);
 
     if (s->rx_count > 0) {
         s->lsr |= LSR_DR;
@@ -502,8 +324,6 @@ void calypso_uart_receive(void *opaque, const uint8_t *buf, int size)
 
     calypso_uart_update_irq(s);
 }
-
-/* ---- MMIO ---- */
 
 static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -515,12 +335,7 @@ static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
         if (s->lcr & LCR_DLAB) {
             val = s->dll;
         } else {
-            /* RBR-READ-PROBE (2026-05-27) : log access size + offset + ARM
-             * mem_io_pc (host retaddr, but stable within a single insn).
-             * Combine with [UART-POP-PROBE] : if N pops per N reads with same
-             * mem_io_pc → access-size decomposition. If N pops per N reads
-             * with distinct mem_io_pc → real distinct LDRs (no decomposition,
-             * no rerun). Different counts → other byte-loss mechanism. */
+
             if (s->label && !strcmp(s->label, "modem")) {
                 static int read_log = 0;
                 if (read_log < 200) {
@@ -542,7 +357,6 @@ static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
                 s->lsr &= ~LSR_DR;
             }
 
-            /* RBR debug: log bytes read by firmware from modem UART */
             if (s->label && !strcmp(s->label, "modem")) {
                 static int rbr_log = 0;
                 if (rbr_log < 200) {
@@ -570,10 +384,7 @@ static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
         } else {
             val = s->iir;
             if ((s->iir & 0x0F) == IIR_TX_EMPTY) {
-                /* TX burst drain: don't clear pending on the first read.
-                 * This lets the firmware ISR loop and drain multiple bytes.
-                 * Clear only after 2 consecutive reads without a THR write
-                 * (meaning the ISR has no more data to send). */
+
                 s->tx_empty_reads++;
                 if (s->tx_empty_reads >= 2) {
                     s->thr_empty_pending = false;
@@ -652,60 +463,17 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
         } else {
             uint8_t ch = (uint8_t)value;
 
-            /* TX trace: tag modem UART as L1CTL-PTY.
-             * Per-byte log is volume-heavy (>140k lines per minute under
-             * fw-console "LOST N!" flood). Gated on env CALYPSO_UART_TRACE=1
-             * (default OFF) to keep host I/O free for QEMU emulation —
-             * heavy stderr writes were causing BTS to die from "No more
-             * clock from transceiver" because bridge couldn't get scheduled. */
-            {
-                static int trace_enabled = -1;
-                if (trace_enabled < 0) {
-                    const char *e = getenv("CALYPSO_UART_TRACE");
-                    trace_enabled = (e && *e == '1') ? 1 : 0;
-                }
-                if (trace_enabled) {
-                    const char *tag = (s->label && !strcmp(s->label, "modem"))
-                                      ? "L1CTL-PTY" : "UART";
-                    const char *lbl = (s->label && !strcmp(s->label, "modem"))
-                                      ? "" : s->label ? s->label : "?";
-                    fprintf(stderr, "[%s%s%s] >>>TX %02x\n",
-                            tag, *lbl ? ":" : "", lbl, ch);
-                }
-            }
 
-            if (s->label && !strcmp(s->label, "modem")) {
-                uart_log_raw("/tmp/qemu-modem-tx.raw", &ch, 1);
-            } else if (s->label && !strcmp(s->label, "irda")) {
-                uart_log_raw("/tmp/qemu-irda-tx.raw", &ch, 1);
-            }
 
-            /* Non-blocking TX (2026-05-29 fix — observer-effect kill).
-             *
-             * `qemu_chr_fe_write_all` est synchrone : bloque ARM jusqu'à ce
-             * que tout soit écrit dans le chardev backend (PTY). Sous LOST
-             * cascade firmware (20-char × 217/sec = 37% du wall en sercomm
-             * print à 115200 bps), ARM saturait → frame_irq pas servicé →
-             * next check_lost_frame voit pire diff → encore LOST → boucle
-             * self-amplifiante. La mesure était la maladie.
-             *
-             * Maintenant : write non-blocking. Si le backend ne peut pas
-             * absorber tout immédiatement, on DROP (= la trace diagnostique
-             * a priorité moindre que l'avancement firmware). Firmware ne
-             * voit jamais le backpressure → frame_irq toujours servicé à
-             * temps → boucle LOST cassée. */
             (void)qemu_chr_fe_write(&s->chr, &ch, 1);
 
-            /* Feed TX byte to L1CTL socket (sercomm parser).
-             * Cette voie n'a pas le problème de backpressure (= unix socket
-             * non-bloquant by default), on la laisse synchrone. */
             if (s->label && !strcmp(s->label, "modem")) {
-                l1ctl_sock_uart_tx_byte(ch);
+                calypso_l1ctl_tap_tx_byte(ch);
             }
 
             s->lsr |= LSR_THRE | LSR_TEMT;
             s->thr_empty_pending = true;
-            s->tx_empty_reads = 0;  /* reset burst counter — ISR wrote a byte */
+            s->tx_empty_reads = 0;
             calypso_uart_update_irq(s);
         }
         break;
@@ -717,16 +485,6 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
             uint8_t old = s->ier;
             s->ier = value & 0x0F;
 
-            if (old != s->ier && s->label && strcmp(s->label, "modem") != 0) {
-                /* Off-main-thread : ARM TCG ne bloque pas sur stdio.
-                 * Avant : fprintf inline → IER toggle 1.25 Hz × ~50µs
-                 * stdio lock = jitter cumulé sur ARM. */
-                calypso_async_log("[UART:%s] IER=0x%02x (RX=%d TX=%d)\n",
-                        s->label ? s->label : "?",
-                        s->ier,
-                        !!(s->ier & IER_RX_DATA),
-                        !!(s->ier & IER_TX_EMPTY));
-            }
 
             if (!(old & IER_TX_EMPTY) &&
                 (s->ier & IER_TX_EMPTY) &&
@@ -825,8 +583,6 @@ static const MemoryRegionOps calypso_uart_ops = {
     .valid = { .min_access_size = 1, .max_access_size = 1 },
 };
 
-/* ---- QOM ---- */
-
 static void calypso_uart_realize(DeviceState *dev, Error **errp)
 {
     CalypsoUARTState *s = CALYPSO_UART(dev);
@@ -855,8 +611,6 @@ static void calypso_uart_realize(DeviceState *dev, Error **errp)
                 s->label ? s->label : "?",
                 (void *)s);
 
-        /* Start RX poll timer using REALTIME clock to force the CPU to
-         * yield and process chardev I/O from the PTY backend. */
         s->rx_poll_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                         calypso_uart_rx_poll, s);
         timer_mod(s->rx_poll_timer,

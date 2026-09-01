@@ -1,7 +1,4 @@
-/*
- * Calypso I2C Controller - Minimal stub
- * Returns "ready" immediately to avoid firmware blocking
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
@@ -18,8 +15,8 @@ struct CalypsoI2CState {
 static uint64_t calypso_i2c_read(void *opaque, hwaddr offset, unsigned size)
 {
     switch (offset) {
-    case 0x04: /* STATUS - always ready */
-        return 0x04; /* ARDY (access ready) */
+    case 0x04:
+        return 0x04;
     default:
         return 0;
     }
@@ -28,7 +25,7 @@ static uint64_t calypso_i2c_read(void *opaque, hwaddr offset, unsigned size)
 static void calypso_i2c_write(void *opaque, hwaddr offset, uint64_t value,
                               unsigned size)
 {
-    /* Accept all writes silently */
+
 }
 
 static const MemoryRegionOps calypso_i2c_ops = {
@@ -41,7 +38,7 @@ static const MemoryRegionOps calypso_i2c_ops = {
 static void calypso_i2c_realize(DeviceState *dev, Error **errp)
 {
     CalypsoI2CState *s = CALYPSO_I2C(dev);
-    
+
     memory_region_init_io(&s->iomem, OBJECT(dev), &calypso_i2c_ops, s,
                           "calypso-i2c", 0x100);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);

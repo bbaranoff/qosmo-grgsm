@@ -1,19 +1,4 @@
-/*
- * fw_console.c — diagnostic poller for the layer1 firmware printf_buffer
- *
- * The osmocom-bb compal_e88 firmware (layer1.highram.elf) builds printf
- * output in `printf_buffer` (symbol at 0x00831018) via cons_puts. On real
- * hardware cons_puts pushes the assembled string to the LCD framebuffer
- * (fb_bw8_putstr at 0x82a1b4); QEMU does not emulate the LCD, so the
- * strings just sit in RAM and get overwritten on the next printf.
- *
- * This poller wakes every FW_POLL_MS simulated milliseconds, snapshots the
- * buffer via cpu_physical_memory_read, and emits the string to
- * /tmp/qemu-fw-console.log + stderr whenever its content changes. Polling
- * misses printfs that get overwritten between two ticks; for noisy paths
- * lower FW_POLL_MS or mirror the buffer to stderr at additional event
- * sites (DSP IDLE, IRQ entry, etc.).
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"

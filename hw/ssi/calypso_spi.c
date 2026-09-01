@@ -1,14 +1,4 @@
-/*
- * calypso_spi.c — Calypso SPI + TWL3025 ABB
- *
- * REWRITE: Correct register map + poweroff blocking.
- *
- * The OsmocomBB loader calls twl3025_power_off() (writes TOGBR1 bit 0)
- * whenever flash_init() fails. In QEMU we block this to keep the
- * loader alive so osmoload can still inject firmware.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
@@ -16,7 +6,6 @@
 #include "qemu/log.h"
 #include "hw/arm/calypso/calypso_spi.h"
 
-/* Register offsets */
 #define SPI_REG_SET1     0x00
 #define SPI_REG_SET2     0x02
 #define SPI_REG_CTRL     0x04
@@ -26,10 +15,7 @@
 #define SPI_REG_RX_LSB   0x0C
 #define SPI_REG_RX_MSB   0x0E
 
-/* CTRL bits */
 #define SPI_CTRL_START   (1 << 0)
-
-/* ---- TWL3025 ABB SPI transaction ---- */
 
 static uint16_t twl3025_spi_xfer(CalypsoSPIState *s, uint16_t tx)
 {
@@ -48,18 +34,11 @@ static uint16_t twl3025_spi_xfer(CalypsoSPIState *s, uint16_t tx)
     } else {
         fprintf(stderr, "[SPI] ABB write addr=0x%02x data=0x%02x", addr, wdata);
 
-        /* ---- TOGBR1 (0x09): power control toggle ----
-         * Bit 0 (TOGB) = power off the phone.
-         * The loader calls twl3025_power_off() which writes 1 here
-         * whenever flash_init() fails.
-         * We BLOCK this to keep the loader alive in QEMU.
-         */
         if (addr == ABB_TOGBR1 && (wdata & 0x01)) {
             fprintf(stderr, " *** POWEROFF BLOCKED (TOGBR1 bit 0) ***\n");
-            return 0;  /* Don't store, don't poweroff */
+            return 0;
         }
 
-        /* ---- TOGBR2 (0x0A): other toggles ---- */
         if (addr == ABB_TOGBR2) {
             fprintf(stderr, " (TOGBR2)\n");
             s->abb_regs[addr] = wdata;
@@ -76,8 +55,6 @@ static uint16_t twl3025_spi_xfer(CalypsoSPIState *s, uint16_t tx)
         return 0;
     }
 }
-
-/* ---- MMIO read ---- */
 
 static uint64_t calypso_spi_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -106,8 +83,6 @@ static uint64_t calypso_spi_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
     }
 }
-
-/* ---- MMIO write ---- */
 
 static void calypso_spi_write(void *opaque, hwaddr offset, uint64_t value,
                                unsigned size)
@@ -152,8 +127,6 @@ static const MemoryRegionOps calypso_spi_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
     .impl = { .min_access_size = 2, .max_access_size = 2 },
 };
-
-/* ---- QOM lifecycle ---- */
 
 static void calypso_spi_realize(DeviceState *dev, Error **errp)
 {

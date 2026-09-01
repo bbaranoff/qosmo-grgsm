@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef HW_ARM_CALYPSO_FW_CONSOLE_H
 #define HW_ARM_CALYPSO_FW_CONSOLE_H
 

@@ -1,7 +1,4 @@
-/*
- * calypso_soc.h - TI Calypso System-on-Chip
- * SPDX-License-Identifier: GPL-2.0-or-later
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #ifndef HW_ARM_CALYPSO_SOC_H
 #define HW_ARM_CALYPSO_SOC_H
@@ -19,10 +16,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(CalypsoSoCState, CALYPSO_SOC)
 #define CALYPSO_SOC_NUM_IRQS  2
 
 struct CalypsoSoCState {
-    /*< private >*/
+
     SysBusDevice parent_obj;
 
-    /*< public >*/
     MemoryRegion iram;
 
     CalypsoINTHState  inth;
@@ -37,7 +33,6 @@ struct CalypsoSoCState {
     qemu_irq cpu_irq;
     qemu_irq cpu_fiq;
 
-    /* IRAM-at-zero alias (controlled by CNTL register) */
     MemoryRegion iram_alias;
     bool iram_at_zero;
     MemoryRegion cntl_iomem;
@@ -45,4 +40,4 @@ struct CalypsoSoCState {
 
 };
 
-#endif /* HW_ARM_CALYPSO_SOC_H */
+#endif
