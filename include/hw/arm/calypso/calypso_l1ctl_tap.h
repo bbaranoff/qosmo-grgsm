@@ -5,6 +5,6 @@
 #include <stdint.h>
 
 void calypso_l1ctl_tap_tx_byte(uint8_t byte);
-void calypso_l1ctl_tap_forget_channel(void);
+void calypso_l1ctl_tap_channel_released(void);
 
 #endif

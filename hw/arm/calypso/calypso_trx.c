@@ -25,6 +25,7 @@ extern CalypsoUARTState *g_uart_irda;
 #define IDLE_PC_HI             0x00826000u
 #define INTH_MASK_ADDR         0xFFFFFA08u
 #define BOOT_POLLS_BEFORE_BOOT 3
+#define FN_SYNC_TOLERANCE      2
 
 typedef struct CalypsoTRX {
     qemu_irq *irqs;
@@ -74,13 +75,21 @@ uint32_t calypso_trx_get_fn(void)
 
 void calypso_trx_autosync_fn(uint32_t sch_fn)
 {
-    if (!g_trx || g_trx->fn_synced) {
+    if (!g_trx) {
         return;
     }
-    g_trx->fn_offset = (int64_t)sch_fn - (int64_t)g_trx->fn;
+    int64_t offset = (int64_t)sch_fn - (int64_t)g_trx->fn;
+    int64_t drift = offset - g_trx->fn_offset;
+    if (drift < 0) {
+        drift = -drift;
+    }
+    if (g_trx->fn_synced && drift <= FN_SYNC_TOLERANCE) {
+        return;
+    }
+    g_trx->fn_offset = offset;
     g_trx->fn_synced = true;
     fprintf(stderr, "[trx] horloge FN calee sur le SCH gr-gsm : fn=%u offset=%lld\n",
-            sch_fn, (long long)g_trx->fn_offset);
+            sch_fn, (long long)offset);
 }
 
 static uint64_t api_read(void *opaque, hwaddr off, unsigned size)

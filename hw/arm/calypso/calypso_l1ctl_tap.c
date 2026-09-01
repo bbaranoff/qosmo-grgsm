@@ -16,6 +16,7 @@
 #define L1CTL_DATA_CONF     0x0f
 
 #define SHM_DCCH_CFG        "/dev/shm/calypso_dcch_cfg"
+#define DCCH_RELEASED       0xFF
 
 static struct {
     enum { SC_IDLE, SC_IN_FRAME, SC_ESCAPE } state;
@@ -113,7 +114,11 @@ void calypso_l1ctl_tap_tx_byte(uint8_t byte)
     }
 }
 
-void calypso_l1ctl_tap_forget_channel(void)
+void calypso_l1ctl_tap_channel_released(void)
 {
+    if (tap.last_chan_nr == 0xFF) {
+        return;
+    }
     tap.last_chan_nr = 0xFF;
+    dcch_cfg_publish(DCCH_RELEASED, 0, 0);
 }

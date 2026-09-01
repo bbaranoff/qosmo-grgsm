@@ -313,8 +313,8 @@ static bool dcch_si_guard(void)
     }
     if (g.tick - g.dcch_guard_tick > DCCH_GUARD_TICKS) {
         g.dcch_guard_armed = false;
-        calypso_l1ctl_tap_forget_channel();
-        L1_LOG("garde DCCH levee (peremption)");
+        calypso_l1ctl_tap_channel_released();
+        L1_LOG("canal dedie libere");
         return false;
     }
     return true;
@@ -680,6 +680,8 @@ static void l1_reset(void)
     g.agch_valid = false;
     g.sdcch_valid = false;
     g.sdcch_ss_set = false;
+    g.dcch_guard_armed = false;
+    calypso_l1ctl_tap_channel_released();
 }
 
 void calypso_l1_page_written(uint16_t v)
