@@ -51,10 +51,17 @@ mod_qemu_start() {
         -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
     qpid=$!
     printf '%s\n' "$qpid" > "${RUN_DIR}/qemu.pid"
-    ( trap '' HUP; _qemu_save_head "$qlog" "${LOG_DIR}/qemu-tete.log" "${QEMU_LOG_HEAD}" ) &
-    ( trap '' HUP; _qemu_log_guard "$qlog" "$QEMU_LOG_MAX" "$qpid" ) &
+    ( trap '' HUP; _qemu_save_head "$qlog" "${LOG_DIR}/qemu-tete.log" "${QEMU_LOG_HEAD}" ) >/dev/null 2>&1 </dev/null &
+    ( trap '' HUP; _qemu_log_guard "$qlog" "$QEMU_LOG_MAX" "$qpid" ) >/dev/null 2>&1 </dev/null &
     mod_say "tête     : ${LOG_DIR}/qemu-tete.log"
     mod_ok
+}
+
+_qemu_running() {
+    local sock="$1"
+    printf 'info status\n' \
+        | timeout 3 socat -t 1 - "UNIX-CONNECT:$sock" 2>/dev/null \
+        | grep -q 'VM status: running'
 }
 
 mod_qemu_wait() {
@@ -62,18 +69,22 @@ mod_qemu_wait() {
     wait_until "${MOD_TIMEOUT[qemu]}" "socket du moniteur QEMU" have_unix "$sock" || return $MOD_RC_FAIL
     local qpid; qpid="$(cat "${RUN_DIR}/qemu.pid" 2>/dev/null || echo 0)"
     if ! kill -0 "$qpid" 2>/dev/null; then
-        mod_hint "regardez la fin de $qlog : QEMU s'est arrêté pendant l'initialisation"
+        modb_tail "$qlog" 20
+        mod_hint "cause typique : machine type ou firmware invalide"
         mod_fail "QEMU a démarré puis s'est arrêté"
         return $MOD_RC_FAIL
     fi
-    local a b
-    a="$(stat -c %s "$qlog" 2>/dev/null || echo 0)"
-    sleep 1.5
-    b="$(stat -c %s "$qlog" 2>/dev/null || echo 0)"
-    if [ "$a" = "$b" ]; then
-        mod_hint "le modèle ne produit aucune trace : vérifiez le firmware ($FIRMWARE_ELF)"
-        mod_fail "QEMU tourne mais n'écrit rien dans son journal"
-        return $MOD_RC_FAIL
+    if command -v socat >/dev/null 2>&1; then
+        wait_until "${MOD_TIMEOUT[qemu]}" "machine virtuelle en marche" _qemu_running "$sock" || {
+            modb_tail "$qlog" 20
+            mod_hint "socat - UNIX-CONNECT:$sock puis « info status » pour voir l'état de la machine"
+            return $MOD_RC_FAIL
+        }
+    else
+        wait_until "${MOD_TIMEOUT[qemu]}" "PTY série alloués" grep -aq 'label serial1' "$qlog" || {
+            modb_tail "$qlog" 20
+            return $MOD_RC_FAIL
+        }
     fi
     mod_ok
 }
