@@ -97,9 +97,13 @@ wait_until() {
 #
 # On écarte donc soi-même, et tout ce qui n'est manifestement qu'une visionneuse.
 have_proc() {
-    local motif="$1" p ligne
+    local motif="$1" p ligne ns
+    ns="$(readlink /proc/self/ns/pid 2>/dev/null)"
     for p in $(pgrep -f "$motif" 2>/dev/null); do
         [ "$p" = "$$" ] || [ "$p" = "$PPID" ] && continue
+        # Un processus d'un conteneur (multi-op Docker) porte le même nom mais
+        # vit dans un autre espace de PID : il ne compte pas pour l'hôte.
+        [ -z "$ns" ] || [ "$(readlink "/proc/$p/ns/pid" 2>/dev/null)" = "$ns" ] || continue
         # Le PID peut disparaître entre pgrep et cette lecture : on englobe la
         # redirection elle-même, sinon bash signale l'échec sur stderr.
         ligne="$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null )"
