@@ -36,9 +36,9 @@
 #define SHM_KC          "/dev/shm/calypso_kc_l1"
 
 #define TOA_ON_TIME     23
-#define PM_NOMINAL      0x7000
 #define SNR_NOMINAL     0x7000
-#define RF_TARGET_DBM   (-60)
+#define RF_SERVING_DBM  (-60)
+#define RF_SILENT_DBM   (-110)
 
 #define SB_MAX_AGE_FRAMES   104
 #define AGCH_TTL_TICKS      100
@@ -83,9 +83,9 @@ static struct {
     bool     sacch_have;
     bool     sacch_real;
 
+    int      serving_arfcn;
     uint8_t  sb_bsic;
     uint32_t sb_fn;
-    int16_t  sb_toa;
     bool     sb_valid;
     uint32_t sb_capture_fn;
 
@@ -237,9 +237,15 @@ static void rp_serv_demod(uint8_t page, uint16_t toa, uint16_t pm)
     d[D_SNR] = SNR_NOMINAL;
 }
 
+static bool on_serving_cell(void)
+{
+    int tuned = calypso_trf6151_arfcn();
+    return tuned < 0 || tuned == g.serving_arfcn;
+}
+
 static uint16_t apm_nominal(void)
 {
-    return calypso_trf6151_apm_for_rf(RF_TARGET_DBM);
+    return calypso_trf6151_apm_for_rf(on_serving_cell() ? RF_SERVING_DBM : RF_SILENT_DBM);
 }
 
 static uint32_t encode_sb(uint8_t bsic, uint32_t fn)
@@ -271,7 +277,7 @@ static void dispatch_pm(uint8_t page)
 
 static void dispatch_sb(uint8_t page)
 {
-    if (!g.sb_valid) {
+    if (!g.sb_valid || !on_serving_cell()) {
         return;
     }
     if ((int)(calypso_trx_get_fn() - g.sb_capture_fn) > SB_MAX_AGE_FRAMES) {
@@ -284,7 +290,7 @@ static void dispatch_sb(uint8_t page)
     a[2] = 0;
     a[3] = (uint16_t)(sb & 0xFFFF);
     a[4] = (uint16_t)(sb >> 16);
-    rp_serv_demod(page, TOA_ON_TIME, PM_NOMINAL);
+    rp_serv_demod(page, TOA_ON_TIME, apm_nominal());
     *api_rp(page, RP_D_TASK_MD) = SB_DSP_TASK;
 }
 
@@ -292,7 +298,7 @@ static void present_ccch(uint8_t page, const uint8_t *l2)
 {
     ndb_block(NDB_A_CD, 0, l2);
     *api_rp(page, RP_D_TASK_D) = ALLC_DSP_TASK;
-    rp_serv_demod(page, TOA_ON_TIME, PM_NOMINAL);
+    rp_serv_demod(page, TOA_ON_TIME, apm_nominal());
 }
 
 static void rotate_si(void)
@@ -383,7 +389,7 @@ static void dispatch_allc(uint8_t page)
     ndb_block(NDB_A_CD, 0, g.si_buf);
     for (uint8_t p = 0; p < 2; p++) {
         *api_rp(p, RP_D_TASK_D) = ALLC_DSP_TASK;
-        rp_serv_demod(p, TOA_ON_TIME, PM_NOMINAL);
+        rp_serv_demod(p, TOA_ON_TIME, apm_nominal());
     }
 }
 
@@ -712,9 +718,6 @@ void calypso_l1_page_written(uint16_t v)
     if (g.d_task_u != 0 && !capture_tch_ul(g.d_task_u)) {
         capture_sdcch_ul(g.d_task_u);
     }
-    if (g.d_task_md == PM_DSP_TASK) {
-        dispatch_pm(page);
-    }
 }
 
 void calypso_l1_burst_written(uint16_t d_burst_d)
@@ -748,7 +751,7 @@ void calypso_l1_rach_conf(uint32_t fn)
 
 bool calypso_l1_read_override(uint32_t off, uint16_t *out)
 {
-    if (!g.sb_valid) {
+    if (!g.sb_valid || !on_serving_cell()) {
         switch (off) {
         case API_NDB + NDB_D_FB_DET:
         case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_TOA:
@@ -765,13 +768,13 @@ bool calypso_l1_read_override(uint32_t off, uint16_t *out)
     case API_NDB + NDB_D_FB_DET:
         *out = 1;
         return true;
+    case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_PM:
+        *out = apm_nominal();
+        return true;
     case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_TOA:
+    case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_ANGLE:
     case API_R_PAGE(0) + RP_A_SERV_DEMOD + 2 * D_TOA:
     case API_R_PAGE(1) + RP_A_SERV_DEMOD + 2 * D_TOA:
-        *out = (uint16_t)g.sb_toa;
-        return true;
-    case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_PM:
-    case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_ANGLE:
         *out = 0;
         return true;
     case API_NDB + NDB_A_SYNC_DEMOD + 2 * D_SNR:
@@ -986,26 +989,20 @@ static void sch_readable(void *opaque)
         if (n < 0) {
             break;
         }
-        if (n < 12 || memcmp(buf, "SCH1", 4) != 0) {
+        if (n < 16 || memcmp(buf, "SCH2", 4) != 0) {
             continue;
         }
         int32_t bsic = (int32_t)ldl_le_p(buf + 4);
         int32_t fn = (int32_t)ldl_le_p(buf + 8);
-        int32_t toa = TOA_ON_TIME;
-        if (n >= 16) {
-            toa = (int32_t)ldl_le_p(buf + 12);
-            if (toa < TOA_ON_TIME - 64 || toa > TOA_ON_TIME + 64) {
-                toa = TOA_ON_TIME;
-            }
-        }
+        int32_t arfcn = (int32_t)ldl_le_p(buf + 12);
         bool first = !g.sb_valid;
         g.sb_bsic = (uint8_t)(bsic & 0x3f);
         g.sb_fn = (uint32_t)fn;
-        g.sb_toa = (int16_t)toa;
+        g.serving_arfcn = arfcn;
         g.sb_valid = true;
         g.sb_capture_fn = calypso_trx_get_fn();
         if (first) {
-            L1_LOG("synchro gr-gsm : BSIC=%u FN=%u TOA=%d", g.sb_bsic, g.sb_fn, toa);
+            L1_LOG("synchro gr-gsm : ARFCN=%d BSIC=%u FN=%u", arfcn, g.sb_bsic, g.sb_fn);
         }
         calypso_trx_autosync_fn((uint32_t)fn);
     }
@@ -1156,6 +1153,9 @@ void calypso_l1_frame_tick(void)
 
     uint8_t page = g.page;
     uint16_t md = g.d_task_md, td = g.d_task_d;
+    if (md == PM_DSP_TASK) {
+        dispatch_pm(page);
+    }
     if (md == SB_DSP_TASK) {
         dispatch_sb(page);
     }
@@ -1178,6 +1178,7 @@ void calypso_l1_frame_tick(void)
 void calypso_l1_init(const char *firmware_elf)
 {
     memset(&g, 0, sizeof(g));
+    g.serving_arfcn = -1;
     if (firmware_elf) {
         g.l1s_addr = elf_symbol(firmware_elf, "l1s");
         g.last_rach_addr = elf_symbol(firmware_elf, "last_rach");

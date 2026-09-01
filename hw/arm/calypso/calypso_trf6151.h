@@ -9,5 +9,6 @@ void calypso_trf6151_tsp_write(uint8_t dev_idx, uint32_t word);
 int calypso_trf6151_total_gain_db(void);
 
 uint16_t calypso_trf6151_apm_for_rf(int target_rf_dbm);
+int calypso_trf6151_arfcn(void);
 
 #endif
