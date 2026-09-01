@@ -90,18 +90,6 @@ static uint8_t fifo_pop(CalypsoUARTState *s)
     s->rx_tail = (s->rx_tail + 1) % CALYPSO_UART_RX_FIFO_SIZE;
     s->rx_count--;
 
-    {
-        static uint64_t pop_total;
-        pop_total++;
-        if (s->label && !strcmp(s->label, "modem") && pop_total <= 200) {
-            fprintf(stderr,
-                    "[UART-POP-PROBE] #%llu byte=0x%02x rx_count_after=%u\n",
-                    (unsigned long long)pop_total,
-                    (unsigned)data,
-                    (unsigned)s->rx_count);
-        }
-    }
-
     return data;
 }
 
@@ -226,8 +214,6 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
                 (uint8_t)(((romload.payload_size + 10) >> 8) & 0xFF),
             };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
-            fprintf(stderr, "[UART:modem] ROMLOAD STUB: ident → ack+param "
-                    "(payload_size=%u)\n", romload.payload_size);
             romload.state = ROM_IDLE;
         } else if (b == 0x77) {
 
@@ -259,8 +245,6 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
 
             uint8_t ack[3] = { 0x3e, 0x63, b };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
-            fprintf(stderr, "[UART:modem] ROMLOAD STUB: checksum 0x%02x → ack\n",
-                    b);
             romload.state = ROM_IDLE;
         }
         return true;
@@ -269,8 +253,6 @@ static bool romload_stub_eat(CalypsoUARTState *s, uint8_t b)
         if (--romload.needed == 0) {
             uint8_t ack[2] = { 0x3e, 0x62 };
             qemu_chr_fe_write_all(&s->chr, ack, sizeof(ack));
-            fprintf(stderr, "[UART:modem] ROMLOAD STUB: branch → ack — "
-                    "switching to sercomm passthrough\n");
             romload.state = ROM_PASSTHROUGH;
         }
         return true;
@@ -336,34 +318,12 @@ static uint64_t calypso_uart_read(void *opaque, hwaddr offset, unsigned size)
             val = s->dll;
         } else {
 
-            if (s->label && !strcmp(s->label, "modem")) {
-                static int read_log = 0;
-                if (read_log < 200) {
-                    uintptr_t pc = current_cpu ? current_cpu->mem_io_pc : 0;
-                    fprintf(stderr,
-                            "[UART-RBR-READ] #%d off=0x%02x size=%u "
-                            "mem_io_pc=0x%lx rx_count_before=%u\n",
-                            read_log, (unsigned)offset, size,
-                            (unsigned long)pc, (unsigned)s->rx_count);
-                    read_log++;
-                }
-            }
-
             val = fifo_pop(s);
 
             if (s->rx_count > 0) {
                 s->lsr |= LSR_DR;
             } else {
                 s->lsr &= ~LSR_DR;
-            }
-
-            if (s->label && !strcmp(s->label, "modem")) {
-                static int rbr_log = 0;
-                if (rbr_log < 200) {
-                    fprintf(stderr, "[UART-RBR] pop=0x%02x rx_count=%u\n",
-                            (unsigned)(val & 0xFF), (unsigned)s->rx_count);
-                    rbr_log++;
-                }
             }
 
             calypso_uart_update_irq(s);
@@ -503,10 +463,6 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
             s->fcr = value;
 
             if (value & FCR_RX_RESET) {
-                if (s->rx_count > 0) {
-                    fprintf(stderr, "[UART:%s] FCR_RX_RESET with %u bytes in FIFO!\n",
-                            s->label ? s->label : "?", (unsigned)s->rx_count);
-                }
                 fifo_reset(s);
                 s->lsr &= ~LSR_DR;
             }
@@ -554,16 +510,10 @@ static void calypso_uart_write(void *opaque, hwaddr offset,
 
     case REG_MDR1:
         s->mdr1 = value;
-        fprintf(stderr, "[UART:%s] MDR1=0x%02x\n",
-                s->label ? s->label : "?",
-                (unsigned)value);
         break;
 
     case REG_SCR:
         s->scr = value;
-        fprintf(stderr, "[UART:%s] SCR=0x%02x\n",
-                s->label ? s->label : "?",
-                (unsigned)value);
         break;
 
     case REG_SSR:
@@ -595,10 +545,6 @@ static void calypso_uart_realize(DeviceState *dev, Error **errp)
 
     connected = qemu_chr_fe_backend_connected(&s->chr);
 
-    fprintf(stderr, "### UART PATCH ACTIVE ###\n");
-    fprintf(stderr, "[UART:%s] realize: chardev %s\n",
-            s->label ? s->label : "?",
-            connected ? "CONNECTED" : "NONE");
 
     if (connected) {
         qemu_chr_fe_set_handlers(&s->chr,
@@ -607,9 +553,6 @@ static void calypso_uart_realize(DeviceState *dev, Error **errp)
                                  NULL, NULL,
                                  s,
                                  NULL, true);
-        fprintf(stderr, "[UART:%s] handlers installed, opaque=%p\n",
-                s->label ? s->label : "?",
-                (void *)s);
 
         s->rx_poll_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                         calypso_uart_rx_poll, s);

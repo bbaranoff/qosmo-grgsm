@@ -24,7 +24,6 @@ struct CalypsoINTHState {
 
     uint16_t ith_v;
     uint16_t fiq_v;
-    int irq_in_service;
     uint32_t levels;
     uint32_t mask;
     int rr_start;

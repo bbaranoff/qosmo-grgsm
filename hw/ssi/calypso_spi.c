@@ -28,26 +28,15 @@ static uint16_t twl3025_spi_xfer(CalypsoSPIState *s, uint16_t tx)
     }
 
     if (read) {
-        fprintf(stderr, "[SPI] ABB read  addr=0x%02x → 0x%04x\n",
-                addr, s->abb_regs[addr]);
         return s->abb_regs[addr];
     } else {
-        fprintf(stderr, "[SPI] ABB write addr=0x%02x data=0x%02x", addr, wdata);
-
         if (addr == ABB_TOGBR1 && (wdata & 0x01)) {
-            fprintf(stderr, " *** POWEROFF BLOCKED (TOGBR1 bit 0) ***\n");
             return 0;
         }
-
-        if (addr == ABB_TOGBR2) {
-            fprintf(stderr, " (TOGBR2)\n");
-            s->abb_regs[addr] = wdata;
-            return 0;
-        }
-
-        fprintf(stderr, "\n");
-
         s->abb_regs[addr] = wdata;
+        if (addr == ABB_TOGBR2) {
+            return 0;
+        }
 
         if (addr == ABB_VRPCDEV) {
             s->abb_regs[ABB_VRPCSTS] = 0x1F;

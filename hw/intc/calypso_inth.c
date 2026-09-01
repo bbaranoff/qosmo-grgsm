@@ -3,10 +3,7 @@
 #include "qemu/osdep.h"
 #include "hw/irq.h"
 #include "hw/sysbus.h"
-#include "qemu/log.h"
 #include "hw/arm/calypso/calypso_inth.h"
-
-static CalypsoINTHState *g_inth;
 
 static void calypso_inth_update(CalypsoINTHState *s)
 {
@@ -46,45 +43,12 @@ static void calypso_inth_set_irq(void *opaque, int irq, int level)
 {
     CalypsoINTHState *s = CALYPSO_INTH(opaque);
 
-    if (irq == 6  ) {
-        static unsigned sim_log;
-        if (sim_log++ < 60)
-            fprintf(stderr,
-                    "[INTH] LINE-SET sim(6) level=%d  mask=0x%08x  "
-                    "bit6_masked=%d  prev_levels=0x%08x  ilr[6]=0x%04x\n",
-                    level, s->mask,
-                    !!(s->mask & (1u<<6)), s->levels, s->ilr[6]);
-    }
-
     if (level) {
         s->levels |= (1u << irq);
     } else {
         s->levels &= ~(1u << irq);
     }
 
-    calypso_inth_update(s);
-}
-
-void calypso_inth_arm_ack(void);
-void calypso_inth_arm_ack(void)
-{
-    CalypsoINTHState *s = g_inth;
-    if (!s) return;
-
-    uint16_t svc = s->ith_v;
-    if (svc > 0 || (s->levels & 1)) {
-        s->levels &= ~(1u << svc);
-        s->rr_start = (svc + 1) % CALYPSO_INTH_NUM_IRQS;
-    }
-    s->irq_in_service = -1;
-
-    {
-        static unsigned _n = 0;
-        if (_n++ < 40)
-            fprintf(stderr, "[INTH] ARM-ACK #%u svc=%u levels=0x%08x mask=0x%08x "
-                    "(new IRQ agreement, depuis le DSP)\n",
-                    _n, svc, s->levels, s->mask);
-    }
     calypso_inth_update(s);
 }
 
@@ -111,20 +75,6 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
         }
 
         calypso_inth_update(s);
-        {
-            static uint32_t total = 0;
-            static uint32_t irq7_count = 0;
-            total++;
-            if (num == 7) {
-                irq7_count++;
-                if (irq7_count <= 50 || (irq7_count % 100) == 0)
-                    fprintf(stderr, "[INTH] IRQ7 dispatch #%u (total=%u) levels=0x%08x mask=0x%08x\n",
-                            irq7_count, total, s->levels, s->mask);
-            }
-            if (total <= 20 || total == 100 || total == 500 || total == 1000)
-                fprintf(stderr, "[INTH] IRQ_NUM=%u (#%u) levels=0x%08x mask=0x%08x\n",
-                        num, total, s->levels, s->mask);
-        }
         return num;
     }
     case 0x12:
@@ -136,10 +86,6 @@ static uint64_t calypso_inth_read(void *opaque, hwaddr offset, unsigned size)
             s->levels &= ~(1u << num);
         }
         calypso_inth_update(s);
-        static unsigned fiq_log;
-        if (fiq_log++ < 30)
-            fprintf(stderr, "[INTH] FIQ_NUM=%u read levels=0x%08x mask=0x%08x\n",
-                    num, s->levels, s->mask);
         return num;
     }
     case 0x14:
@@ -163,55 +109,25 @@ static void calypso_inth_write(void *opaque, hwaddr offset, uint64_t value,
 
     case 0x00:
     {
-        uint32_t old = s->levels;
         s->levels &= (0xFFFF0000u | (uint32_t)(value & 0xFFFF));
-        if (old != s->levels) {
-            static unsigned _n = 0;
-            if (_n++ < 20)
-                fprintf(stderr, "[INTH] IT_REG1-ACK val=0x%04x levels 0x%08x -> 0x%08x\n",
-                        (unsigned)value, old, s->levels);
-        }
         calypso_inth_update(s);
         break;
     }
     case 0x02:
     {
-        uint32_t old = s->levels;
         s->levels &= (0x0000FFFFu | ((uint32_t)(value & 0xFFFF) << 16));
-        if (old != s->levels) {
-            static unsigned _n = 0;
-            if (_n++ < 20)
-                fprintf(stderr, "[INTH] IT_REG2-ACK val=0x%04x levels 0x%08x -> 0x%08x\n",
-                        (unsigned)value, old, s->levels);
-        }
         calypso_inth_update(s);
         break;
     }
     case 0x08:
     {
-        uint32_t old = s->mask;
         s->mask = (s->mask & 0xFFFF0000) | (value & 0xFFFF);
-
-        static unsigned mask_log;
-        if (mask_log++ < 50)
-            fprintf(stderr,
-                    "[INTH] MASK-W LO val=0x%04x  full 0x%08x → 0x%08x  "
-                    "bit6(SIM)=%d bit7(UART)=%d levels=0x%08x\n",
-                    (unsigned)value, old, s->mask,
-                    !!(s->mask & (1u<<6)), !!(s->mask & (1u<<7)),
-                    s->levels);
         calypso_inth_update(s);
         break;
     }
     case 0x0a:
     {
-        uint32_t old = s->mask;
         s->mask = (s->mask & 0x0000FFFF) | ((value & 0xFFFF) << 16);
-        static unsigned mask_log_hi;
-        if (mask_log_hi++ < 50)
-            fprintf(stderr,
-                    "[INTH] MASK-W HI val=0x%04x  full 0x%08x → 0x%08x\n",
-                    (unsigned)value, old, s->mask);
         calypso_inth_update(s);
         break;
     }
@@ -256,8 +172,6 @@ static void calypso_inth_realize(DeviceState *dev, Error **errp)
 {
     CalypsoINTHState *s = CALYPSO_INTH(dev);
 
-    g_inth = s;
-
     memory_region_init_io(&s->iomem, OBJECT(dev), &calypso_inth_ops, s,
                           "calypso-inth", 0x100);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
@@ -276,7 +190,6 @@ static void calypso_inth_reset(DeviceState *dev)
     s->mask = 0x00000000;
     s->ith_v = 0;
     s->fiq_v = 0;
-    s->irq_in_service = -1;
     s->rr_start = 0;
     memset(s->ilr, 0, sizeof(s->ilr));
 }
