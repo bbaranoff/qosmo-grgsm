@@ -1,25 +1,10 @@
-# =============================================================================
-#  10-stp — OsmoSTP, le point de transfert sémaphore (SS7 / M3UA)
-# =============================================================================
-#  RÔLE      tout le SS7 du cœur passe par lui : le MSC (PC 1.1.1) et le BSC
-#            (PC 1.1.3) s'y raccordent comme ASP M3UA. Tant qu'il n'écoute pas,
-#            aucun des deux ne peut se parler — d'où sa place en tête du bloc.
-#  PRÉREQUIS binaire osmo-stp ; $OSMOCOM_CFG/osmo-stp.cfg ; support SCTP dans le
-#            noyau (l'écoute M3UA est du SCTP, pas du TCP).
-#  SUCCÈS    VTY en écoute (4239) ET socket M3UA SCTP en écoute sur le port lu
-#            dans la conf (« listen m3ua <port> ») ET aucun redémarrage de
-#            l'unité depuis notre lancement.
-#  JOURNAL   journalctl -u osmo-stp    (sans systemd : $LOG_DIR/osmo-stp.log)
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER stp "Cœur — OsmoSTP (SS7/M3UA)"
 MOD_REQUIRED[stp]=1
-MOD_PROFILES[stp]="calypso faketrx hybrid core"
 MOD_JOURNAL[stp]="osmo-stp"
 MOD_TIMEOUT[stp]=25
-# Échappatoire héritée de start-direct.sh : NO_OSMO_START=1 saute tout le cœur.
 MOD_ENABLED_IF[stp]='[ "${NO_OSMO_START:-0}" != 1 ]'
 
 : "${STP_UNIT:=osmo-stp}"
@@ -35,7 +20,6 @@ mod_stp_check() {
     [ -r "$(_stp_cfg)" ] || {
         mod_hint "déployez la configuration : cp configs/osmo-stp.cfg $OSMOCOM_CFG/"
         mod_fail "configuration illisible : $(_stp_cfg)"; return $MOD_RC_FAIL; }
-    # Sans SCTP, osmo-stp démarre puis n'écoute jamais : autant le dire ici.
     if [ ! -e /proc/net/sctp/snmp ] && ! lsmod 2>/dev/null | grep -q '^sctp'; then
         mod_hint "chargez le module côté hôte : modprobe sctp (un conteneur ne peut pas le faire)"
         mod_fail "SCTP indisponible dans ce noyau — l'écoute M3UA est impossible"
@@ -53,8 +37,6 @@ mod_stp_start() {
     mod_ok
 }
 
-# BARRIÈRE — « actif » ne suffit pas : l'unité porte Restart=always, donc un STP
-# qui meurt à l'init réapparaît indéfiniment sans jamais ouvrir son écoute.
 mod_stp_wait() {
     local to="${MOD_TIMEOUT[stp]}" m3ua; m3ua="$(_stp_m3ua)"
 

@@ -1,31 +1,9 @@
-# =============================================================================
-#  21-abonnes-hlr — provisionnement des abonnés dans le HLR
-# =============================================================================
-#  RÔLE      crée les IMSI/MSISDN/Ki que les mobiles présenteront. Ce n'est pas
-#            un service mais une ÉTAPE du cœur : sans elle, le rattachement est
-#            rejeté (« IMSI unknown in HLR ») et l'on croit à une panne radio.
-#            Reprend la dérivation exacte de feed_hlr (start-direct.sh) :
-#              IMSI   = MCC MNC %04d(op) %06d(ms)
-#              MSISDN = <nœud>00<op><ms>       (100101, 100102, 100201...)
-#              Ki     = 00112233445566778899aabbccdd %02x(ms) %02x(op)
-#  PRÉREQUIS HLR prêt (VTY joignable) ; socat ou telnet pour parler au VTY.
-#  SUCCÈS    le DERNIER abonné de la série est réellement relu depuis le HLR —
-#            par la base sqlite en lecture seule si elle est accessible, sinon
-#            par « subscriber imsi <imsi> show » sur le VTY. Écrire n'est pas
-#            réussir : la barrière relit.
-#  JOURNAL   $LOGDIR/mod/abonnes-hlr.log
-#
-#  IDEMPOTENT : « subscriber create » sur un IMSI existant est sans effet
-#  destructeur ; mod_*_status saute l'étape si le dernier abonné est déjà là.
-#  L'arrêt ne supprime AUCUN abonné (ce serait détruire l'état du réseau).
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER abonnes-hlr "Cœur — abonnés provisionnés dans le HLR"
 MOD_REQUIRED[abonnes-hlr]=0
 MOD_DEPS[abonnes-hlr]="hlr"
-MOD_PROFILES[abonnes-hlr]="calypso faketrx hybrid core"
 MOD_TIMEOUT[abonnes-hlr]=30
 MOD_ENABLED_IF[abonnes-hlr]='[ "${NO_OSMO_START:-0}" != 1 ]'
 
@@ -40,22 +18,6 @@ _abo_mnc() { printf '%s\n' "${MNC:-$(core_cfg_field "$(core_cfg osmo-msc)" '^[[:
 _abo_imsi() { printf '%s%s%04d%06d\n' "$(_abo_mcc)" "$(_abo_mnc)" "$OPERATOR_ID" "$1"; }
 _abo_ki()   { printf '00112233445566778899aabbccdd%02x%02x\n' "$1" "$OPERATOR_ID"; }
 
-# ── LE NŒUD N'ENTRE QUE DANS LE MSISDN ────────────────────────────────
-# IMSI et Ki gardent EXACTEMENT leur dérivation : ils sont recalculés à
-# l'identique par start-direct.sh (ms_imsi/ms_ki), start.sh et le gabarit de
-# mobile.cfg. Y glisser le nœud ferait diverger le Ki du mobile de celui du
-# HLR, et l'authentification échouerait sur un Kc différent des deux côtés —
-# sans autre trace qu'un CIPHER MODE rejeté.
-# Le MSISDN, lui, ne sert à aucun calcul : c'est une adresse, et elle doit dire
-# de quel nœud elle vient, sinon deux nœuds revendiquent les mêmes numéros.
-#
-# L'ancien plan était « op * 10000 + ms » — 10001, 10002. Cinq chiffres dont le
-# premier EST le numéro d'opérateur : le numéro ne disait rien de la machine
-# qui le porte, et sur un banc à plusieurs nœuds l'opérateur 1 du nœud 1 et
-# celui du nœud 2 revendiquaient tous deux 10001. Le dépôt osmo_egprs a changé
-# de plan (generate_configs.sh, osmo_msisdn) ; ce module était resté en arrière
-# et c'est LUI que run.sh exécute — le HLR gardait donc 10001/10002 pendant que
-# le dialplan et les routes SMS attendaient 100101/100102.
 _abo_node() {
     local n="${OSMO_WAN_NODE:-${WAN_NODE_ID:-}}"
     [ -n "$n" ] || n="$(sed -n 's/^PLAN_NODE=//p' "${OSMOCOM_CFG:-/etc/osmocom}/radio-plan.env" 2>/dev/null | tail -1)"
@@ -64,8 +26,6 @@ _abo_node() {
 }
 _abo_msisdn() { echo $(( $(_abo_node) * 100000 + OPERATOR_ID * 100 + $1 )); }
 
-# Relecture de l'abonné : base sqlite en lecture seule d'abord (fiable et
-# instantanée), VTY en repli si sqlite est indisponible.
 _abo_present() {
     local imsi="$1" n=""
     if [ -r "$HLR_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
@@ -88,15 +48,6 @@ mod_abonnes_hlr_check() {
     mod_ok
 }
 
-# ── L'ÉTAT, C'EST L'IMSI *ET* SON MSISDN ────────────────────────────
-# Ne vérifier que la présence de l'IMSI rend cette étape aveugle à tout
-# changement de numérotation : après un « ./start-direct.sh --regen », les
-# configs repartent sur <nœud>00<op><ms> pendant que le HLR garde les MSISDN
-# de l'ancien plan. L'IMSI, lui, n'a pas bougé — le module se déclarait donc
-# « déjà fait » et ne mettait rien à jour. L'abonné s'attachait (l'IMSI est
-# connu) mais restait injoignable : aucun appel, aucun SMS, et rien nulle part
-# pour dire que le numéro du HLR n'était plus celui du dialplan.
-# « subscriber ... update msisdn » est idempotent : rejouer ne coûte rien.
 _abo_msisdn_now() {
     local imsi="$1" v=""
     if [ -r "$HLR_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
@@ -123,11 +74,6 @@ mod_abonnes_hlr_start() {
         cmds+=("subscriber imsi $imsi update msisdn $msisdn")
         cmds+=("subscriber imsi $imsi update aud2g comp128v1 ki $(_abo_ki "$m")")
     done
-    # « exit » et non « end » : au nœud enable, end n'existe pas — le VTY
-    # répondait « % Unknown command. » et surtout laissait la session OUVERTE.
-    # telnet, contrairement à socat, ne rend pas la main sur EOF de stdin : il
-    # restait pendu jusqu'au timeout, qui le tuait avec un code non nul, et le
-    # provisionnement était compté en échec alors qu'il avait eu lieu.
     cmds+=("exit")
     mod_say "provisionnement de $N_MS abonné(s), nœud $(_abo_node), opérateur $OPERATOR_ID, PLMN $(_abo_mcc)-$(_abo_mnc) — MSISDN $(_abo_msisdn 1)..$(_abo_msisdn "$N_MS")"
     core_vty_ask "$HLR_VTY_PORT" "${cmds[@]}" || {
@@ -136,8 +82,6 @@ mod_abonnes_hlr_start() {
     mod_ok
 }
 
-# BARRIÈRE — le VTY accepte des commandes invalides sans broncher : la seule
-# preuve est la relecture de l'abonné créé en dernier.
 mod_abonnes_hlr_wait() {
     local imsi; imsi="$(_abo_imsi "$N_MS")"
     if ! wait_until "${MOD_TIMEOUT[abonnes-hlr]}" "abonné $imsi présent dans le HLR" _abo_present "$imsi"; then
@@ -147,5 +91,4 @@ mod_abonnes_hlr_wait() {
     mod_ok
 }
 
-# Aucun arrêt : les abonnés sont de l'état persistant, pas un processus.
 mod_abonnes_hlr_stop() { return 0; }

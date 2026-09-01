@@ -1,26 +1,9 @@
-# =============================================================================
-#  13-msc — OsmoMSC, le commutateur du service circuit (CS)
-# =============================================================================
-#  RÔLE      VLR + commutation CS : rattachements, SMS, appels. Il est client
-#            GSUP du HLR, client MGCP du MGW, et ASP M3UA du STP — les trois
-#            doivent être là AVANT lui, d'où MOD_DEPS.
-#  PRÉREQUIS binaires et conf osmo-msc ; STP/HLR/MGW prêts.
-#  SUCCÈS    VTY en écoute (4254) ET association SCTP ÉTABLIE depuis le port
-#            local de l'ASP déclaré dans la conf (le lien M3UA vers le STP est
-#            réellement monté, pas seulement configuré) ET socket MNCC en
-#            écoute si « mncc external » est configuré ET aucun redémarrage.
-#  JOURNAL   journalctl -u osmo-msc    (sans systemd : $LOG_DIR/osmo-msc.log)
-#
-#  NOTE la socket MNCC (/tmp/msc_mncc) n'est PAS visible avec [ -S ] : le
-#  service tourne avec un /tmp privé. On la sonde donc via ss -xl, qui la voit.
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER msc "Cœur — OsmoMSC (commutation CS)"
 MOD_REQUIRED[msc]=1
 MOD_DEPS[msc]="stp hlr mgw"
-MOD_PROFILES[msc]="calypso faketrx hybrid core"
 MOD_JOURNAL[msc]="osmo-msc"
 MOD_TIMEOUT[msc]=40
 MOD_ENABLED_IF[msc]='[ "${NO_OSMO_START:-0}" != 1 ]'
@@ -29,8 +12,6 @@ MOD_ENABLED_IF[msc]='[ "${NO_OSMO_START:-0}" != 1 ]'
 : "${MSC_VTY_PORT:=4254}"
 
 _msc_cfg()      { core_cfg osmo-msc; }
-# « asp <nom> <port distant> <port local> m3ua » → le port local identifie
-# l'association SCTP côté MSC.
 _msc_asp_port() { core_cfg_field "$(_msc_cfg)" '^[[:space:]]*asp[[:space:]]+.*[[:space:]]m3ua[[:space:]]*$' 4 ""; }
 _msc_mncc()     { core_cfg_field "$(_msc_cfg)" '^[[:space:]]*mncc[[:space:]]+external[[:space:]]' 3 ""; }
 
@@ -51,9 +32,6 @@ mod_msc_start() {
     mod_ok
 }
 
-# BARRIÈRE — un MSC « actif » dont l'ASP n'est jamais passé ACTIVE ne verra
-# jamais le BSC : le rattachement échouerait sans que rien ne le signale. Le
-# critère est l'association SCTP établie, sondée passivement (ss --sctp).
 mod_msc_wait() {
     local to="${MOD_TIMEOUT[msc]}" asp mncc
     asp="$(_msc_asp_port)"; mncc="$(_msc_mncc)"

@@ -1,23 +1,9 @@
-# =============================================================================
-#  17-sgsn — OsmoSGSN, le nœud de service paquet
-# =============================================================================
-#  RÔLE      rattachement GPRS/EDGE de l'abonné (GMM/SM) : client GSUP du HLR,
-#            client GTP du GGSN, et point d'arrivée NS/BSSGP du PCU. Optionnel
-#            pour la voix et le SMS.
-#  PRÉREQUIS binaire et conf osmo-sgsn ; HLR prêt (GSUP) ; l'adresse d'écoute
-#            NS doit être portée par une interface locale.
-#  SUCCÈS    VTY en écoute (4245) ET socket NS UDP en écoute sur l'adresse et
-#            le port lus dans la conf (« ns / bind udp local / listen ») ET
-#            aucun redémarrage depuis le lancement.
-#  JOURNAL   journalctl -u osmo-sgsn   (sans systemd : $LOG_DIR/osmo-sgsn.log)
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER sgsn "Cœur — OsmoSGSN (rattachement paquet)"
 MOD_REQUIRED[sgsn]=0
 MOD_DEPS[sgsn]="hlr"
-MOD_PROFILES[sgsn]="calypso faketrx hybrid core"
 MOD_JOURNAL[sgsn]="osmo-sgsn"
 MOD_TIMEOUT[sgsn]=25
 MOD_ENABLED_IF[sgsn]='[ "${NO_OSMO_START:-0}" != 1 ] && [ "${CORE_GPRS:-1}" = 1 ]'
@@ -51,8 +37,6 @@ mod_sgsn_start() {
     mod_ok
 }
 
-# BARRIÈRE — sans écoute NS, le PCU ne pourra jamais monter son NS-VC et la
-# data restera muette, alors que le service paraîtra actif.
 mod_sgsn_wait() {
     local to="${MOD_TIMEOUT[sgsn]}" ip port
     ip="$(_sgsn_ns_ip)"; port="$(_sgsn_ns_port)"

@@ -1,23 +1,8 @@
-# =============================================================================
-#  11-hlr — OsmoHLR, le registre des abonnés (GSUP)
-# =============================================================================
-#  RÔLE      détient les IMSI, les clés Ki et les MSISDN. Le MSC et le SGSN s'y
-#            connectent en GSUP au démarrage ; sans HLR, aucun rattachement
-#            (Location Update) n'aboutit. C'est le seul service que l'ancien
-#            osmo-start.sh considérait comme fatal (osmo-start.sh:84-87).
-#  PRÉREQUIS binaire osmo-hlr ; $OSMOCOM_CFG/osmo-hlr.cfg ; répertoire de la
-#            base sqlite accessible en écriture (/var/lib/osmocom).
-#  SUCCÈS    VTY en écoute (4258) ET port GSUP en écoute sur l'adresse déclarée
-#            dans la conf (« gsup / bind ip », 127.0.0.2:4222 par défaut) ET
-#            aucun redémarrage depuis le lancement.
-#  JOURNAL   journalctl -u osmo-hlr    (sans systemd : $LOG_DIR/osmo-hlr.log)
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER hlr "Cœur — OsmoHLR (registre GSUP)"
 MOD_REQUIRED[hlr]=1
-MOD_PROFILES[hlr]="calypso faketrx hybrid core"
 MOD_JOURNAL[hlr]="osmo-hlr"
 MOD_TIMEOUT[hlr]=30
 MOD_ENABLED_IF[hlr]='[ "${NO_OSMO_START:-0}" != 1 ]'
@@ -55,8 +40,6 @@ mod_hlr_start() {
     mod_ok
 }
 
-# BARRIÈRE — le VTY monte avant que la base soit ouverte ; c'est le port GSUP
-# qui prouve que le HLR peut réellement servir MSC et SGSN.
 mod_hlr_wait() {
     local to="${MOD_TIMEOUT[hlr]}" gip; gip="$(_hlr_gsup_ip)"
 

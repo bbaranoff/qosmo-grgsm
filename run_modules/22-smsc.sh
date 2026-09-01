@@ -1,27 +1,9 @@
-# =============================================================================
-#  22-smsc — passerelle SMS (proto-smsc-daemon + relay interop)
-# =============================================================================
-#  RÔLE      porte les SMS : le daemon se connecte au HLR en GSUP sous le nom
-#            IPA « SMSC-OP<n> » (déclaré dans osmo-hlr.cfg : « smsc entity /
-#            smsc default-route ») et expose la socket d'envoi MT ; le relay
-#            python écoute en TCP pour les SMS inter-opérateurs.
-#            Délègue à /etc/osmocom/smsc-start.sh — on ne réimplémente pas ce
-#            qui marche, on l'encadre d'une barrière.
-#  PRÉREQUIS proto-smsc-daemon ; smsc-start.sh ; HLR prêt (GSUP) ;
-#            /etc/osmocom/sms-routing.conf pour le relay.
-#  SUCCÈS    socket d'envoi MT présente ET port TCP du relay en écoute (ce
-#            dernier seulement si le script du relay est installé).
-#  JOURNAL   $LOG_DIR/smsc-op<n>.log ; journal des SMS MO reçus :
-#            /var/log/osmocom/mo-sms-op<n>.log  (chemin réel, différent de
-#            celui qu'annonçait start-direct.sh:493).
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER smsc "Cœur — passerelle SMS (proto-SMSC)"
 MOD_REQUIRED[smsc]=0
 MOD_DEPS[smsc]="hlr"
-MOD_PROFILES[smsc]="calypso faketrx hybrid core"
 MOD_TIMEOUT[smsc]=60
 MOD_ENABLED_IF[smsc]='[ "${NO_OSMO_START:-0}" != 1 ] && [ "${CORE_SMS:-1}" = 1 ]'
 
@@ -49,8 +31,6 @@ mod_smsc_status() { have_proc 'proto-smsc-daemon'; }
 
 mod_smsc_start() {
     mkdir -p "$RUN_DIR" "$LOG_DIR" /var/log/osmocom 2>/dev/null || true
-    # Purge ciblée d'un daemon résiduel : deux instances se disputeraient la
-    # même socket MT et le même nom IPA côté HLR.
     pkill -f 'proto-smsc-daemon' 2>/dev/null
     local log="$LOG_DIR/smsc-op${OPERATOR_ID}.log"
     mod_say "journal : $log ; SMS MO reçus : /var/log/osmocom/mo-sms-op${OPERATOR_ID}.log"
@@ -60,9 +40,6 @@ mod_smsc_start() {
     mod_ok
 }
 
-# BARRIÈRE — smsc-start.sh attend lui-même le HLR puis temporise : « lancé » ne
-# dit rien. Les deux critères sont les deux points d'entrée réellement utilisés
-# ensuite (envoi MT par la socket, SMS entrants par le relay).
 mod_smsc_wait() {
     local to="${MOD_TIMEOUT[smsc]}"
 

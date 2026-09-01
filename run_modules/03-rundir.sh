@@ -1,41 +1,6 @@
-# =============================================================================
-#  03-rundir — répertoire d'exécution (PID, sockets, verrous)
-# =============================================================================
-#
-#  RÔLE
-#      Garantir l'existence et l'utilisabilité de RUN_DIR, le seul endroit où la
-#      pile écrit son ÉTAT VOLATIL : fichiers PID, sockets de rendez-vous
-#      (qemu-monitor.sock), verrous. C'est le point d'appui de tout le reste —
-#      40-qemu y écrit qemu.pid et y ouvre le socket de son moniteur, et sa
-#      barrière relit ce PID pour distinguer « QEMU s'est arrêté » de « QEMU
-#      tourne mais le DSP est figé ». Un RUN_DIR absent ou non inscriptible fait
-#      donc échouer les modules suivants sur un symptôme sans rapport avec la
-#      cause.
-#
-#      PÉRIMÈTRE. Ce module ne s'occupe PAS des journaux ni des captures :
-#      09-logs en est propriétaire (arborescence, archivage, horodatage, liens).
-#      Ici, et uniquement ici, l'état volatil.
-#
-#      paths.env place RUN_DIR sous ${XDG_RUNTIME_DIR:-/tmp}/calypso. L'ancien
-#      lancement écrivait en dur dans /root : un tiers n'a aucune raison d'y
-#      écrire, et deux piles ne pouvaient pas cohabiter.
-#
-#  PRÉREQUIS
-#      profil (RUN_DIR est résolu par environnement/paths.env).
-#
-#  CRITÈRE DE SUCCÈS
-#      BARRIÈRE — une écriture RÉELLE aboutit dans RUN_DIR (création puis
-#      suppression d'un témoin). Tester les droits ne suffit pas : un montage
-#      passé en lecture seule, ou un volume plein, satisfait `-w` et échoue à
-#      l'écriture.
-#
-#  JOURNAL
-#      $LOG_DIR/mod/rundir.log : chemin retenu et restes constatés.
-# -----------------------------------------------------------------------------
 MOD_REGISTER rundir "Répertoire d'exécution"
 MOD_REQUIRED[rundir]=1
 MOD_DEPS[rundir]="profil"
-MOD_PROFILES[rundir]="calypso faketrx hybrid core"
 MOD_TIMEOUT[rundir]=15
 
 mod_rundir_check() {
@@ -60,8 +25,6 @@ mod_rundir_check() {
     mod_ok
 }
 
-# « Déjà fait » = le répertoire est là et utilisable. Ce module ne laisse
-# derrière lui aucun processus, seulement un état constaté.
 mod_rundir_status() { [ -d "${RUN_DIR:-}" ] && [ -w "${RUN_DIR:-}" ]; }
 
 mod_rundir_start() {
@@ -92,8 +55,6 @@ mod_rundir_wait() {
     mod_ok
 }
 
-# On ne supprime pas le répertoire : il peut porter des traces utiles au
-# diagnostic. Seuls partent les fichiers PID dont le processus est mort.
 mod_rundir_stop() {
     local f pid
     for f in "${RUN_DIR:-/nonexistent}"/*.pid; do

@@ -1,23 +1,9 @@
-# =============================================================================
-#  16-ggsn — OsmoGGSN, la sortie paquet (GTP)
-# =============================================================================
-#  RÔLE      termine les tunnels GTP du SGSN et route le trafic de l'abonné
-#            vers l'APN (interface TUN). Sans lui, pas de contexte PDP : la
-#            data GPRS/EDGE ne s'établit pas. Optionnel pour la voix et le SMS.
-#  PRÉREQUIS binaire et conf osmo-ggsn ; l'interface TUN de l'APN ; l'adresse
-#            « gtp bind-ip » doit être portée par une interface locale.
-#  SUCCÈS    VTY en écoute (4260) ET les deux sockets GTP UDP en écoute sur
-#            l'adresse de bind (2123 contrôle, 2152 utilisateur) ET aucun
-#            redémarrage depuis le lancement.
-#  JOURNAL   journalctl -u osmo-ggsn   (sans systemd : $LOG_DIR/osmo-ggsn.log)
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER ggsn "Cœur — OsmoGGSN (data GTP)"
 MOD_REQUIRED[ggsn]=0
 MOD_DEPS[ggsn]="apn0"
-MOD_PROFILES[ggsn]="calypso faketrx hybrid core"
 MOD_JOURNAL[ggsn]="osmo-ggsn"
 MOD_TIMEOUT[ggsn]=25
 MOD_ENABLED_IF[ggsn]='[ "${NO_OSMO_START:-0}" != 1 ] && [ "${CORE_GPRS:-1}" = 1 ]'
@@ -53,8 +39,6 @@ mod_ggsn_start() {
     mod_ok
 }
 
-# BARRIÈRE — le GGSN peut être « actif » et n'avoir ouvert aucun tunnel s'il
-# n'a pas pu se lier à son adresse GTP ou attacher son interface TUN.
 mod_ggsn_wait() {
     local to="${MOD_TIMEOUT[ggsn]}" ip; ip="$(_ggsn_ip)"
 

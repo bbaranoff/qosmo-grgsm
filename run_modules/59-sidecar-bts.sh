@@ -1,36 +1,15 @@
-# =============================================================================
-#  59-sidecar-bts — le second osmo-bts-trx (BTS#1 du profil hybride)
-# =============================================================================
-#
-#  RÔLE    La station de base du side-car : elle parle TRXD à fake_trx d'un côté
-#          et Abis/IPA au MÊME BSC que le BTS#0 de l'autre. C'est ce partage du
-#          BSC qui permet à MS#2 d'appeler MS#1.
-#
-#  ⚠ COURSE CONNUE « No clock since TRX was started »
-#    osmo-bts-trx peut mourir QUELQUES SECONDES après son démarrage si fake_trx
-#    ne lui fournit pas l'horloge à temps. Un simple « le processus est vivant »
-#    juste après le lancement déclarerait donc le module prêt à tort. On exige
-#    une FENÊTRE DE STABILITÉ, et on relance jusqu'à SC_BTS_RETRIES fois — c'est
-#    un contournement de course, pas un correctif : la vraie question est
-#    pourquoi fake_trx tarde à publier son horloge.
-#
-#  SUCCÈS  processus stable pendant SC_BTS_STAB_SECS, sans « No clock » au
-#          journal, puis VTY $SC_BTS_VTY_PORT en écoute.
-#  JOURNAL $LOG_DIR/sidecar-bts.log
-# -----------------------------------------------------------------------------
 . "$(dirname "${BASH_SOURCE[0]}")/_lib/radio.sh"
 
 MOD_REGISTER sidecar-bts "Station de base BTS#1 (side-car)"
 MOD_REQUIRED[sidecar-bts]=1
 MOD_DEPS[sidecar-bts]="sidecar-faketrx bsc"
-MOD_PROFILES[sidecar-bts]="hybrid"
 MOD_TIMEOUT[sidecar-bts]=30
 
 : "${SC_BTS_BIN:=osmo-bts-trx}"
 : "${SC_BTS_STAB_SECS:=8}"
 : "${SC_BTS_RETRIES:=3}"
 
-_sc_bts_mort() {   # le journal avoue-t-il la course ?
+_sc_bts_mort() {
     grep -qE "No clock since TRX|BTS_SHUTDOWN.*Shutting down" "$(radio_log sidecar-bts)" 2>/dev/null
 }
 
@@ -45,8 +24,6 @@ mod_sidecar_bts_check() {
 
 mod_sidecar_bts_status() { radio_alive sidecar-bts; }
 
-# Le lancement PORTE la reprise sur course : une seule tentative laisserait le
-# module échouer alors qu'un simple redémarrage suffit dans la majorité des cas.
 mod_sidecar_bts_start() {
     radio_dirs
     local log; log="$(radio_log sidecar-bts)"
@@ -54,7 +31,6 @@ mod_sidecar_bts_start() {
     while :; do
         essai=$(( essai + 1 ))
         : > "$log"
-        # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
         setsid stdbuf -oL -eL "$SC_BTS_BIN" -c "$SC_BTS_CFG" >>"$log" 2>&1 </dev/null &
         radio_save_pid sidecar-bts $!
         reste="$SC_BTS_STAB_SECS"

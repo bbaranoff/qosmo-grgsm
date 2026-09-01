@@ -1,26 +1,9 @@
-# =============================================================================
-#  18-pcu — OsmoPCU, le contrôleur paquet côté BTS
-# =============================================================================
-#  RÔLE      ordonnance les blocs RLC/MAC de la data et relie la BTS au SGSN
-#            (NS/BSSGP). Il se connecte à la socket PCU **créée par la BTS**
-#            (pcu-socket, /tmp/pcu_bts) : il peut donc démarrer avant elle et
-#            attendre — c'est pourquoi ce module ne dépend pas de la BTS, qui
-#            n'appartient pas au bloc cœur.
-#  PRÉREQUIS binaire et conf osmo-pcu ; SGSN prêt pour que la data serve à
-#            quelque chose (dépendance déclarée mais non bloquante : optionnel).
-#  SUCCÈS    service vivant, sans redémarrage depuis le lancement, et VTY en
-#            écoute. Le numéro du VTY (4240) n'est PAS déclaré dans la conf :
-#            s'il n'apparaît pas, on ne conclut pas à l'échec, on se replie sur
-#            la sonde de vie — et on le dit dans le journal du module.
-#  JOURNAL   journalctl -u osmo-pcu    (sans systemd : $LOG_DIR/osmo-pcu.log)
-# -----------------------------------------------------------------------------
 : "${MODDIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 . "$MODDIR/_lib/core.sh"
 
 MOD_REGISTER pcu "Cœur — OsmoPCU (ordonnanceur paquet)"
 MOD_REQUIRED[pcu]=0
 MOD_DEPS[pcu]="sgsn"
-MOD_PROFILES[pcu]="calypso faketrx hybrid core"
 MOD_JOURNAL[pcu]="osmo-pcu"
 MOD_TIMEOUT[pcu]=20
 MOD_ENABLED_IF[pcu]='[ "${NO_OSMO_START:-0}" != 1 ] && [ "${CORE_GPRS:-1}" = 1 ]'
@@ -45,15 +28,10 @@ mod_pcu_start() {
     core_svc_start "$PCU_UNIT" "$(core_bin osmo-pcu)" -c "$(_pcu_cfg)" \
         || { mod_fail "systemctl start $PCU_UNIT a échoué"
              mod_hint "journalctl -u $PCU_UNIT -n 30"; return $MOD_RC_FAIL; }
-    # Reprise de osmo-start.sh:109 : la socket appartient à la BTS et n'est pas
-    # forcément accessible à l'utilisateur osmocom. Sans effet si elle n'existe
-    # pas encore (cas normal quand la BTS n'est pas démarrée).
     [ -e "$PCU_SOCKET" ] && chmod 777 "$PCU_SOCKET" 2>/dev/null
     mod_ok
 }
 
-# BARRIÈRE — un PCU qui meurt sur une conf invalide est relancé toutes les 2 s
-# par systemd ; c'est ce que détecte core_restarted_since.
 mod_pcu_wait() {
     if ! core_alive "$PCU_UNIT"; then
         mod_hint "journalctl -u $PCU_UNIT -n 30"

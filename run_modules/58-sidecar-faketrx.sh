@@ -1,27 +1,8 @@
-# =============================================================================
-#  58-sidecar-faketrx — le transceiver simulé du BTS#1 (profil hybride)
-# =============================================================================
-#
-#  RÔLE    Commutateur de bursts UDP entre le second osmo-bts-trx et trxcon :
-#
-#      osmo-bts-trx#1 <--TRXD $SC_TRX_PORT--> fake_trx <--TRXD $SC_BB_PORT--> trxcon
-#
-#          Ni RF ni I/Q : des bursts recopiés. C'est ce qui rend le side-car
-#          déterministe, là où la chaîne du BTS#0 passe par une modélisation I/Q.
-#
-#  ORDRE   AVANT le BTS#1 : osmo-bts-trx scrute le POWERON du transceiver et
-#          meurt sur « No clock since TRX was started » s'il ne le trouve pas.
-#
-#  SUCCÈS  le processus vit ET le port UDP côté BTS est lié. Le PID seul ne
-#          prouve rien : un python qui rate son bind meurt une seconde après.
-#  JOURNAL $LOG_DIR/sidecar-faketrx.log
-# -----------------------------------------------------------------------------
 . "$(dirname "${BASH_SOURCE[0]}")/_lib/radio.sh"
 
 MOD_REGISTER sidecar-faketrx "Transceiver simulé du BTS#1"
 MOD_REQUIRED[sidecar-faketrx]=1
 MOD_DEPS[sidecar-faketrx]="sidecar-cfg"
-MOD_PROFILES[sidecar-faketrx]="hybrid"
 MOD_TIMEOUT[sidecar-faketrx]=20
 
 : "${FAKETRX_PY:=${OSMOCOM_BB:-${GSM_ROOT}/osmocom-bb}/src/target/trx_toolkit/fake_trx.py}"
@@ -50,7 +31,6 @@ mod_sidecar_faketrx_start() {
     local log; log="$(radio_log sidecar-faketrx)"
     mod_say "fake_trx -P $SC_TRX_PORT (BTS#1) -p $SC_BB_PORT (bande de base)"
     mod_say "journal  : $log"
-    # setsid : detache du pty de "docker exec" (voir _lib/radio.sh, bloc SIGHUP)
     setsid stdbuf -oL -eL "$FAKETRX_PYTHON" "$FAKETRX_PY" \
         -b "$TRX_BIND_IP" -R "$TRX_BTS_IP" -r "$TRX_BB_IP" \
         -P "$SC_TRX_PORT" -p "$SC_BB_PORT" >>"$log" 2>&1 </dev/null &

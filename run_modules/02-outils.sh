@@ -1,45 +1,10 @@
-# =============================================================================
-#  02-outils — outillage de l'hôte                                (module PUR)
-# =============================================================================
-#
-#  RÔLE
-#      Vérifier, AVANT de lancer quoi que ce soit, que les commandes dont les
-#      modules se servent existent sur cette machine. L'ancien lancement les
-#      supposait toutes présentes : `nc` manque déjà sur cette image, et le
-#      chemin de repli (telnet) n'a pas la même sémantique de fermeture — la
-#      panne se manifestait 90 s plus tard, sur un feed HLR muet.
-#
-#      Ce module distingue deux listes : ce SANS QUOI RIEN NE MARCHE (échec), et
-#      ce dont l'absence dégrade une fonction précise (signalé au journal).
-#
-#  PRÉREQUIS
-#      Aucun. Module purement lecteur : il n'installe rien, ne modifie pas le
-#      PATH, ne touche à aucun paquet. (L'ancien script tentait un
-#      `apt-get install pulseaudio` en pleine séquence de démarrage : jamais ici.)
-#
-#  CRITÈRE DE SUCCÈS
-#      1. toutes les commandes de OUTILS_REQUIS sont résolues par `command -v` ;
-#      2. BARRIÈRE — un shell ENFANT les résout aussi, avec le PATH qu'auront les
-#         processus lancés par les modules (un PATH construit par un `.bashrc`
-#         non hérité est la panne classique en environnement conteneur).
-#
-#  JOURNAL
-#      $LOG_DIR/mod/outils.log : la liste des chemins résolus, et les manques
-#      non fatals avec la fonction qu'ils dégradent.
-# -----------------------------------------------------------------------------
 MOD_REGISTER outils "Outillage de l'hôte"
 MOD_REQUIRED[outils]=1
 MOD_PURE[outils]=1
-MOD_PROFILES[outils]="calypso faketrx hybrid core"
 MOD_TIMEOUT[outils]=10
 
-# Indispensables : utilisés par mod.sh (sondes, wait_until) et par les modules
-# d'infrastructure eux-mêmes.
 : "${OUTILS_REQUIS:=bash sleep pgrep pkill kill stat grep sed awk ip mkfifo rm}"
 
-# Utiles mais remplaçables — chacun avec ce qu'il dégrade, pour que le message
-# soit exploitable et pas une simple liste. Tableau (les descriptions contiennent
-# des espaces) : surchargeable en le déclarant avant de sourcer les modules.
 if ! declare -p OUTILS_OPTIONNELS >/dev/null 2>&1; then
     OUTILS_OPTIONNELS=(
         "ss|sonde des ports d'écoute (repli : /dev/tcp, sans nom de tenant)"
@@ -65,7 +30,7 @@ mod_outils_check() {
     mod_ok
 }
 
-mod_outils_status() { return $MOD_RC_FAIL; }   # module pur
+mod_outils_status() { return $MOD_RC_FAIL; }
 
 mod_outils_start() {
     local c n d
@@ -83,8 +48,6 @@ mod_outils_start() {
     mod_ok
 }
 
-# Le PATH traverse-t-il jusqu'aux enfants ? C'est eux qui exécuteront QEMU,
-# osmocon et les sondes.
 _outils_enfant_resout() {
     bash -c 'command -v ip >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1 && command -v stat >/dev/null 2>&1'
 }
