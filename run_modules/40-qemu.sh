@@ -45,11 +45,29 @@ mod_qemu_start() {
     local qlog="${LOG_DIR}/qemu.log" qpid
     mod_say "machine  : calypso"
     mod_say "journal  : $qlog (plafond ${QEMU_LOG_MAX} o)"
-    setsid "$QEMU_BIN" -M calypso -cpu arm946 \
-        -serial pty -serial pty \
-        -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
-        -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
-    qpid=$!
+    # [2026-09-03] LANCEUR C `qosmo-grgsm` (tools/qosmo-launch, installe dans
+    # /usr/local/bin par `make install`). Meme ligne de commande que ci-dessous
+    # (-M calypso, -cpu arm946, -serial pty x2, -monitor, -kernel), lecture de
+    # l1s/last_rach dans l'ELF, relais de stdout+stderr de QEMU dans qemu.log
+    # (41-pty continue de lire « redirected to /dev/pts/N »), et deux liens
+    # stables : $RUN_DIR/modem.pty (serial0, celui d'osmocon) et $RUN_DIR/irda.pty.
+    # Il transmet SIGTERM a QEMU et meurt avec lui. Sans lanceur : ligne historique.
+    # Pas de gdbstub ici (comme avant : la ligne historique n'en avait pas).
+    local launcher="${QOSMO_LAUNCHER:-/usr/local/bin/qosmo-grgsm}"
+    if [ -x "$launcher" ]; then
+        mod_say "lanceur  : $launcher (QOSMO_LAUNCHER)"
+        setsid "$launcher" --qemu "$QEMU_BIN" -k "$FIRMWARE_ELF" --bin "$FIRMWARE_BIN" \
+            --cpu arm946 --gdb off --rundir "$RUN_DIR" \
+            --monitor "${RUN_DIR}/qemu-monitor.sock" >>"$qlog" 2>&1 </dev/null &
+        qpid=$!
+    else
+        mod_say "lanceur  : absent ($launcher) — ligne qemu-system-arm directe ; installez-le : make -C ${QEMU_TREE:-.}/tools/qosmo-launch install"
+        setsid "$QEMU_BIN" -M calypso -cpu arm946 \
+            -serial pty -serial pty \
+            -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
+            -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &
+        qpid=$!
+    fi
     printf '%s\n' "$qpid" > "${RUN_DIR}/qemu.pid"
     ( trap '' HUP; _qemu_save_head "$qlog" "${LOG_DIR}/qemu-tete.log" "${QEMU_LOG_HEAD}" ) >/dev/null 2>&1 </dev/null &
     ( trap '' HUP; _qemu_log_guard "$qlog" "$QEMU_LOG_MAX" "$qpid" ) >/dev/null 2>&1 </dev/null &
