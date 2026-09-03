@@ -52,12 +52,16 @@ mod_qemu_start() {
     # (41-pty continue de lire « redirected to /dev/pts/N »), et deux liens
     # stables : $RUN_DIR/modem.pty (serial0, celui d'osmocon) et $RUN_DIR/irda.pty.
     # Il transmet SIGTERM a QEMU et meurt avec lui. Sans lanceur : ligne historique.
-    # Pas de gdbstub ici (comme avant : la ligne historique n'en avait pas).
+    # [2026-09-03] gdbstub ARM ACTIF ici aussi (tcp::$CALYPSO_GDB_PORT, 1234) :
+    # QEMU ne s'arrete que si un client s'y connecte, donc aucun cout tant qu'on
+    # ne s'en sert pas. C'est ce que 44-gdb-telnet.sh attache a la demande
+    # (telnet localhost 44444, cible en marche). CALYPSO_GDB_PORT=off pour couper.
+    : "${CALYPSO_GDB_PORT:=1234}"
     local launcher="${QOSMO_LAUNCHER:-/usr/local/bin/qosmo-grgsm}"
     if [ -x "$launcher" ]; then
-        mod_say "lanceur  : $launcher (QOSMO_LAUNCHER)"
+        mod_say "lanceur  : $launcher (QOSMO_LAUNCHER) ; gdbstub ARM : $CALYPSO_GDB_PORT"
         setsid "$launcher" --qemu "$QEMU_BIN" -k "$FIRMWARE_ELF" --bin "$FIRMWARE_BIN" \
-            --cpu arm946 --gdb off --rundir "$RUN_DIR" \
+            --cpu arm946 --gdb "$CALYPSO_GDB_PORT" --rundir "$RUN_DIR" \
             --monitor "${RUN_DIR}/qemu-monitor.sock" >>"$qlog" 2>&1 </dev/null &
         qpid=$!
     else
