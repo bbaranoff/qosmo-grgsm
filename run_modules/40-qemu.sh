@@ -57,6 +57,14 @@ mod_qemu_start() {
     # ne s'en sert pas. C'est ce que 44-gdb-telnet.sh attache a la demande
     # (telnet localhost 44444, cible en marche). CALYPSO_GDB_PORT=off pour couper.
     : "${CALYPSO_GDB_PORT:=1234}"
+    # [2026-09-05] -display none -parallel none, ICI COMME DANS LE LANCEUR.
+    # La machine calypso n'a pas d'ecran. Sans -display, QEMU prend son defaut
+    # graphique (SDL est compile) et cable ses peripheriques par defaut sur des
+    # consoles virtuelles ; les deux serie etant prises (-serial pty) et le
+    # moniteur aussi, il ne restait que le port parallele : une fenetre SDL vide
+    # intitulee « parallel0 », qui capte le clavier, pendant que le boot se passe
+    # sur les pty. -parallel none supprime en plus le chardev (`info chardev` le
+    # montrait encore en `vc` avec le seul -display none).
     local launcher="${QOSMO_LAUNCHER:-/usr/local/bin/qosmo-grgsm}"
     if [ -x "$launcher" ]; then
         mod_say "lanceur  : $launcher (QOSMO_LAUNCHER) ; gdbstub ARM : $CALYPSO_GDB_PORT"
@@ -67,6 +75,7 @@ mod_qemu_start() {
     else
         mod_say "lanceur  : absent ($launcher) — ligne qemu-system-arm directe ; installez-le : make -C ${QEMU_TREE:-.}/tools/qosmo-launch install"
         setsid "$QEMU_BIN" -M calypso -cpu arm946 \
+            -display none -parallel none \
             -serial pty -serial pty \
             -monitor "unix:${RUN_DIR}/qemu-monitor.sock,server,nowait" \
             -kernel "$FIRMWARE_ELF" >>"$qlog" 2>&1 </dev/null &

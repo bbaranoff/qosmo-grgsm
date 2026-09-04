@@ -77,6 +77,19 @@
 #define DEF_OSMOCON     QOSMO_GSM_ROOT "/osmocom-bb/src/host/osmocon/osmocon"
 #define DEF_CPU         "arm946"
 #define DEF_GDB         "1234"
+/* [2026-09-05] LA MACHINE calypso N A PAS D ECRAN, QEMU LUI EN OUVRAIT UN.
+ * Sans -display, QEMU prend son defaut graphique (SDL est compile dans ce
+ * fork : `qemu-system-arm -display help` le liste) et, display actif, il
+ * cable ses peripheriques par defaut sur des consoles virtuelles. Les deux
+ * serie sont deja prises (-serial pty x2) et le moniteur aussi (-monitor
+ * unix:) : il ne reste que le port parallele. On obtenait une fenetre SDL
+ * vide intitulee « parallel0 », qui capte le clavier, et devant laquelle on
+ * attend un boot qui, lui, se passe sur les pty. Sans DISPLAY
+ * (osmo-banc.service au demarrage) c est pire : QEMU ne peut pas ouvrir SDL
+ * et SORT. Le modele n a rien a afficher : --display none par defaut.
+ * `--display sdl` (ou -display/-nographic apres --) rend l ancien
+ * comportement. */
+#define DEF_DISPLAY     "none"
 #define DEF_L1CTL       "/tmp/osmocom_l2"
 #define DEF_BIND        "0.0.0.0"
 #define DEF_TRX_PORT    "6702"
@@ -384,7 +397,7 @@ static char *gdb_spec(const char *spec)
 
 /* ------------------------------------------------------------- options */
 typedef struct {
-    const char *qemu, *firmware, *fw_bin, *cpu, *rundir, *monitor, *gdb;
+    const char *qemu, *firmware, *fw_bin, *cpu, *rundir, *monitor, *gdb, *display;
     const char *l1ctl, *bind, *trx_port, *iq_tee;
     const char *pty_link, *irda_link;
     const char *dsp_spec;
@@ -435,6 +448,10 @@ static void usage(FILE *f)
 "Divers :\n"
 "      --qemu CHEMIN       binaire qemu-system-arm (défaut : $QEMU_BIN ou %s)\n"
 "      --cpu MODÈLE        (défaut %s)\n"
+"      --display BACKEND   affichage QEMU : none | sdl | … ($QOSMO_DISPLAY, défaut %s).\n"
+"                          La machine calypso n'a pas d'écran : `none` évite la fenêtre\n"
+"                          vide « parallel0 » et permet de tourner sans DISPLAY.\n"
+"      --nographic         équivalent de --display none\n"
 "  -e, --env VAR=VAL       variable d'environnement pour le modèle (CALYPSO_*, …)\n"
 "  -n, --dry-run           affiche l'environnement et la commande, ne lance rien\n"
 "  -q, --quiet             pas de bannière\n"
@@ -460,7 +477,7 @@ static void usage(FILE *f)
         DEF_TRX_PORT, QOSMO_DSP ? "" : "  [sans effet sur ce fork]",
         DEF_IQ_TEE_HOST, DEF_IQ_TEE_PORT, QOSMO_DSP ? "" : "  [sans effet sur ce fork]",
         DEF_OSMOCON_MODEL, DEF_OSMOCON_DELAY, DEF_OSMOCON, DEF_OSMOCON_MODEL, DEF_OSMOCON_DELAY, DEF_OSMOCON_DEBUG,
-        DEF_QEMU, DEF_CPU,
+        DEF_QEMU, DEF_CPU, DEF_DISPLAY,
         g_alias, QOSMO_DSP ? " -dsp /opt/GSM" : "", g_alias, DEF_L1CTL);
 }
 
@@ -518,6 +535,8 @@ static void parse_args(int argc, char **argv, opts_t *o)
         else if (IS("--osmocon-log", NULL, NULL))   o->osmocon_log = VAL();
         else if (IS("--qemu", "--qemu-bin", NULL)) o->qemu = VAL();
         else if (IS("--cpu", "-cpu", NULL))   o->cpu = VAL();
+        else if (IS("--display", "-display", NULL)) o->display = VAL();
+        else if (IS("--nographic", "-nographic", NULL)) o->display = "none";
         else if (IS("-e", "--env", NULL))     argv_push(&o->envs, VAL());
         else if (IS("-n", "--dry-run", NULL)) o->dry_run = true;
         else if (IS("-q", "--quiet", NULL))   o->quiet = true;
@@ -604,6 +623,7 @@ int main(int argc, char **argv)
     if (!o.qemu) o.qemu = env_nonempty("QEMU_BIN") ? env_nonempty("QEMU_BIN") : DEF_QEMU;
     if (!is_exec(o.qemu)) die("qemu-system-arm introuvable : %s (--qemu ; compilez : ninja -C %s/build qemu-system-arm)", o.qemu, QOSMO_TREE);
     if (!o.cpu) o.cpu = DEF_CPU;
+    if (!o.display) o.display = env_nonempty("QOSMO_DISPLAY") ? env_nonempty("QOSMO_DISPLAY") : DEF_DISPLAY;
 
     /* -- firmware -- */
     if (!o.firmware) o.firmware = env_nonempty("FIRMWARE_ELF") ? env_nonempty("FIRMWARE_ELF") : DEF_FIRMWARE;
@@ -734,14 +754,24 @@ int main(int argc, char **argv)
     argv_t qa = { 0 };
     argv_push(&qa, o.qemu);
     bool user_M = false, user_cpu = false, user_serial = false, user_kernel = false;
+    bool user_display = false, user_parallel = false;
     for (int i = 0; i < o.extra.n; i++) {
         if (!strcmp(o.extra.v[i], "-M") || !strcmp(o.extra.v[i], "-machine")) user_M = true;
         if (!strcmp(o.extra.v[i], "-cpu")) user_cpu = true;
         if (!strcmp(o.extra.v[i], "-serial")) user_serial = true;
         if (!strcmp(o.extra.v[i], "-kernel")) user_kernel = true;
+        if (!strcmp(o.extra.v[i], "-display") || !strcmp(o.extra.v[i], "-nographic")) user_display = true;
+        if (!strcmp(o.extra.v[i], "-parallel")) user_parallel = true;
     }
     if (!user_M)   { argv_push(&qa, "-M"); argv_push(&qa, mach); }
     if (!user_cpu) { argv_push(&qa, "-cpu"); argv_push(&qa, o.cpu); }
+    /* -display none : aucune fenetre. -parallel none : et plus de chardev
+     * « parallel0 » du tout (`info chardev` le montrait encore en `vc`
+     * malgre -display none). La machine calypso n a pas de port parallele
+     * a modeliser : ce peripherique par defaut n existait que pour porter
+     * la console virtuelle qu on vient de supprimer. */
+    if (!user_display)  { argv_push(&qa, "-display"); argv_push(&qa, o.display); }
+    if (!user_parallel && !strcmp(o.display, "none")) { argv_push(&qa, "-parallel"); argv_push(&qa, "none"); }
     if (gdb)       { argv_push(&qa, "-gdb"); argv_push(&qa, gdb); }
     if (!user_serial) { argv_push(&qa, "-serial"); argv_push(&qa, "pty"); argv_push(&qa, "-serial"); argv_push(&qa, "pty"); }
     if (!o.no_monitor) { argv_push(&qa, "-monitor"); char *m = xasprintf("unix:%s,server,nowait", o.monitor); argv_push(&qa, m); free(m); }
@@ -769,6 +799,7 @@ int main(int argc, char **argv)
         }
         say("rundir    : %s", o.rundir);
         say("moniteur  : %s", o.no_monitor ? "(aucun)" : o.monitor);
+        say("affichage : %s", user_display ? "(passé à QEMU tel quel)" : o.display);
         say("gdb ARM   : %s", gdb ? gdb : "(off)");
         say("L1CTL     : %s", o.l1ctl);
         if (QOSMO_DSP)
